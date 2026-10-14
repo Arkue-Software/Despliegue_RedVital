@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  ROOT_DIR: ${{ runner.home }}/Downloads/RedVital/Despliegue_RedVital
+  ROOT_DIR: /home/runner/Downloads/RedVital/Despliegue_RedVital
   QA_HOST: https://10.43.98.220
 
 jobs:
@@ -54,7 +54,7 @@ jobs:
             echo "Another deployment is running on vm-datos; waiting..."
             sleep 5
           done
-          echo "LOCKED" > $LOCKDIR/owner
+          echo "LOCKED" > "$LOCKDIR/owner"
         shell: bash
 
       - name: Run migrations (docker-compose up -d)
@@ -93,7 +93,7 @@ jobs:
             echo "Another deployment is running on vm-servicios; waiting..."
             sleep 5
           done
-          echo "LOCKED" > $LOCKDIR/owner
+          echo "LOCKED" > "$LOCKDIR/owner"
         shell: bash
 
       - name: Determine service name
@@ -168,7 +168,7 @@ jobs:
             echo "Another deployment is running on vm-borde; waiting..."
             sleep 5
           done
-          echo "LOCKED" > $LOCKDIR/owner
+          echo "LOCKED" > "$LOCKDIR/owner"
         shell: bash
 
       - name: Deploy edge components
@@ -228,16 +228,5 @@ jobs:
     needs: [e2e]
     if: always()
     steps:
-      - name: Notify Slack (if webhook secret exists)
-        env:
-          WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK || '' }}
-        run: |
-          if [ -n "$WEBHOOK" ]; then
-            STATUS="success"
-            if [ "${{ needs.e2e.result }}" != "success" ]; then STATUS="failure"; fi
-            payload="{\"text\":\"Deployment on ${GITHUB_REF} for ${GITHUB_REPOSITORY} finished: ${STATUS}\"}"
-            curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK" || true
-          else
-            echo "NOTIFY_WEBHOOK not set; skipping notification."
-          fi
-        shell: bash
+      - name: Notify Slack (if*
+

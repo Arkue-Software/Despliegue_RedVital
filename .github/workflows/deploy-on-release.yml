@@ -228,5 +228,16 @@ jobs:
     needs: [e2e]
     if: always()
     steps:
-      - name: Notify Slack (if*
-
+      - name: Notify Slack (if webhook secret exists)
+        env:
+          WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK || '' }}
+        run: |
+          if [ -n "$WEBHOOK" ]; then
+            STATUS="success"
+            if [ "${{ needs.e2e.result }}" != "success" ]; then STATUS="failure"; fi
+            payload="{\"text\":\"Deployment on ${GITHUB_REF} for ${GITHUB_REPOSITORY} finished: ${STATUS}\"}"
+            curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK" || true
+          else
+            echo "NOTIFY_WEBHOOK not set; skipping notification."
+          fi
+        shell: bash

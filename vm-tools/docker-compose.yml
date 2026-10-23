@@ -1,0 +1,84 @@
+# RedVital — VM de Tools (una sola, compartida por QA y producción).
+#
+# Solo monitoreo: Prometheus, Grafana y Kafbat (lectura). Nada se publica
+# fuera de la VM: los tres escuchan en 127.0.0.1 y se usan por túnel SSH.
+#
+#   scripts/generar-secretos.sh tools
+#   scripts/renderizar-tools.sh            (lee ambientes/qa.env y produccion.env)
+#   docker compose -f vm-tools/docker-compose.yml up -d
+#   ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 8080:127.0.0.1:8080 <vm-tools>
+
+name: redvital-tools
+
+x-registro: &registro
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.4.1
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./generado/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - datos-prometheus:/prometheus
+    ports: ["127.0.0.1:9090:9090"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [tools]
+
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    secrets: [grafana_admin]
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - datos-grafana:/var/lib/grafana
+    ports: ["127.0.0.1:3000:3000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on: [prometheus]
+    logging: *registro
+    networks: [tools]
+
+  # Inspección de Kafka de ambos ambientes, en solo lectura, con el usuario
+  # SCRAM "inspeccion" (sin acceso a EV-02, que no tiene ACL para él).
+  kafbat:
+    image: ghcr.io/kafbat/kafka-ui:v1.2.0
+    restart: unless-stopped
+    environment:
+      SPRING_CONFIG_ADDITIONAL_LOCATION: /etc/kafbat/config.yml
+      # Las claves se leen de /run/secrets como propiedades (nunca en el YAML).
+      SPRING_CONFIG_IMPORT: optional:configtree:/run/secrets/
+      DYNAMIC_CONFIG_ENABLED: "false"
+    secrets: [kafbat_admin, kafka_inspeccion_qa, kafka_inspeccion_produccion]
+    volumes: ["./generado/kafbat.yml:/etc/kafbat/config.yml:ro"]
+    ports: ["127.0.0.1:8080:8080"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [tools]
+
+secrets:
+  grafana_admin: { file: ../secretos/tools/grafana_admin }
+  kafbat_admin: { file: ../secretos/tools/kafbat_admin }
+  kafka_inspeccion_qa: { file: ../secretos/tools/kafka_inspeccion_qa }
+  kafka_inspeccion_produccion: { file: ../secretos/tools/kafka_inspeccion_produccion }
+
+volumes:
+  datos-prometheus:
+  datos-grafana:
+
+networks:
+  tools:

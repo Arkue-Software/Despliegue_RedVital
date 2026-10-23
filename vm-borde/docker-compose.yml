@@ -1,0 +1,113 @@
+# RedVital — VM de borde (una por ambiente).
+#
+#   público :80/:443 -> caddy -> /api/* -> apisix -> VM de servicios
+#                             -> resto  -> web (estáticos)
+#
+# Solo Caddy publica puertos al público. APISIX y la web no tienen puertos
+# publicados: únicamente Caddy los alcanza, por la red interna del compose.
+# APISIX resuelve identity-service, campaign-service y donation-service a la
+# IP de la VM de servicios (extra_hosts), así el discovery y el JWKS de
+# Identidad valen igual dentro y fuera de esa VM.
+#
+#   docker compose --env-file ../ambientes/qa.env up -d --build
+
+name: redvital-${AMBIENTE:?}-borde
+
+x-registro: &registro
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  caddy:
+    build: ./caddy
+    image: redvital/borde:${VERSION:-qa}
+    restart: unless-stopped
+    environment:
+      DOMINIO: ${DOMINIO:?}
+      TLS_MODO: ${TLS_MODO:?}
+    ports:
+      - "${IP_PUBLICA_BORDE:-0.0.0.0}:80:8080"
+      - "${IP_PUBLICA_BORDE:-0.0.0.0}:443:8443"
+    volumes:
+      # Certificados y la CA local de QA: deben sobrevivir a los reinicios.
+      - caddy-datos:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      web: { condition: service_healthy }
+      apisix: { condition: service_started }
+    logging: *registro
+    networks: [borde]
+
+  web:
+    build: ${REPOS:-../..}/FrontEnd/frontend-main
+    image: redvital/web:${VERSION:-qa}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [borde]
+
+  apisix:
+    image: apache/apisix:3.19.0-debian
+    restart: unless-stopped
+    volumes:
+      - ${REPOS:-../..}/Tools_RedVital/tools/APISIX-config/config/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ${REPOS:-../..}/Tools_RedVital/tools/APISIX-config/config/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+      - ${REPOS:-../..}/Tools_RedVital/tools/APISIX-config/plugins:/usr/local/apisix/custom:ro
+    secrets: [gateway-secreto-cliente]
+    extra_hosts:
+      - "identity-service:${IP_VM_SERVICIOS:?}"
+      - "campaign-service:${IP_VM_SERVICIOS:?}"
+      - "donation-service:${IP_VM_SERVICIOS:?}"
+    ports:
+      - "${IP_VM_BORDE:?}:9091:9091"   # métricas de APISIX, solo para Tools
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [borde]
+
+  # ------------------------------------------------- Métricas (VM de Tools)
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--path.rootfs=/host"]
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes: ["/:/host:ro,rslave"]
+    ports: ["${IP_VM_BORDE:?}:9100:9100"]
+    logging: *registro
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--docker_only=true", "--housekeeping_interval=30s"]
+    devices: ["/dev/kmsg"]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports: ["${IP_VM_BORDE:?}:9180:8080"]
+    logging: *registro
+
+secrets:
+  gateway-secreto-cliente: { file: "${SECRETOS_DIR:?}/gateway-secreto-cliente" }
+
+volumes:
+  caddy-datos:
+  caddy-config:
+
+networks:
+  borde:

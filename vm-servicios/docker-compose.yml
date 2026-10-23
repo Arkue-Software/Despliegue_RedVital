@@ -1,0 +1,197 @@
+# RedVital — VM de servicios (una por ambiente).
+#
+# Identidad, Campañas, Donación, el trabajador de Notificaciones y el broker
+# Kafka. Los servicios se hablan por la red del compose; entre Campañas y
+# Donación SOLO hay Kafka (ADR-018).
+#
+# Publicado en la IP de la VM, y abierto por el firewall a:
+#   VM de borde  -> 8080 Identidad, 8082 Campañas, 8083 Donación (upstreams de APISIX)
+#   VM de Tools  -> 9094 Kafka EXTERNO (Kafbat), 9404 JMX de Kafka, 8183 métricas
+#                   de Donación, 9100/9180 exportadores
+# Las bases están en la VM de datos: los servicios llegan con TLS (verify-ca).
+#
+# Kafka no es requisito para arrancar (ADR-018): en un despliegue normal los
+# servicios esperan a kafka-init, pero si el broker no está sano o kafka-init
+# falla, igual arrancan (required: false) y atienden; los eventos esperan en la
+# bandeja de salida y los consumidores se conectan cuando el broker vuelva.
+#
+#   docker compose --env-file ../ambientes/qa.env up -d --build
+
+name: redvital-${AMBIENTE:?}-servicios
+
+x-registro: &registro
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+# Endurecimiento común de los servicios: sistema de archivos de solo lectura,
+# sin capacidades y sin escalar privilegios. Todas las imágenes corren sin root.
+x-endurecido: &endurecido
+  restart: unless-stopped
+  read_only: true
+  tmpfs: ["/tmp:size=64m"]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging: *registro
+
+services:
+  identity-service:
+    <<: *endurecido
+    build: ${REPOS:-../..}/Servicios_RedVital/services/identity
+    image: redvital/identity-service:${VERSION:-qa}
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_AMBIENTE:-QA}
+      ConnectionStrings__Identidad: "Host=${IP_VM_DATOS:?};Port=5432;Database=db_identidad;Username=identidad_servicio;${DB_SSL_NPGSQL}"
+      Jwt__RutaSecretoFirma: /run/secrets/identidad_clave_firma
+      Jwt__JwksUriInterna: http://identity-service:8080/.well-known/jwks.json
+    secrets: [identidad_servicio, identidad_clave_firma, postgres_ca]
+    ports: ["${IP_VM_SERVICIOS:?}:8080:8080"]
+    networks: [servicios]
+
+  campaign-service:
+    <<: *endurecido
+    build: ${REPOS:-../..}/Servicios_RedVital/services/campaign
+    image: redvital/campaign-service:${VERSION:-qa}
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_AMBIENTE:-QA}
+      ConnectionStrings__Campanas: "Host=${IP_VM_DATOS:?};Port=5433;Database=db_campana;Username=campana_servicio;${DB_SSL_NPGSQL}"
+      Kafka__Habilitado: "true"
+      Kafka__Servidores: kafka:9092
+      Kafka__Usuario: campanias
+    secrets: [campana_servicio, kafka_campanias, postgres_ca]
+    ports: ["${IP_VM_SERVICIOS:?}:8082:8080"]
+    depends_on:
+      identity-service: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully, required: false }
+    networks: [servicios]
+
+  donation-service:
+    <<: *endurecido
+    build: ${REPOS:-../..}/Servicios_RedVital/services/donation
+    image: redvital/donation-service:${VERSION:-qa}
+    environment:
+      DB_HOST: ${IP_VM_DATOS:?}
+      DB_PORT: "5434"
+      DB_NAME: db_donacion
+      DB_PARAMETROS: ${DB_SSL_JDBC}
+      KAFKA_SERVIDORES: kafka:9092
+      IDENTIDAD_URL: http://identity-service:8080
+      JWT_JWKS_URI: http://identity-service:8080/.well-known/jwks.json
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75 -Djava.io.tmpdir=/tmp
+    secrets: [donacion_servicio, kafka_donacion, donacion_secreto_identidad, donacion_clave_hmac, postgres_ca]
+    ports:
+      - "${IP_VM_SERVICIOS:?}:8083:8080"
+      - "${IP_VM_SERVICIOS:?}:8183:8081"   # /actuator/prometheus, solo para Tools
+    depends_on:
+      identity-service: { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully, required: false }
+    networks: [servicios]
+
+  # Trabajador de Notificaciones (DD, Sección 9): consume EV-02 y entrega los
+  # avisos por correo. Sin base de datos y sin puertos publicados; solo sale a
+  # internet hacia el proveedor SMTP (en QA, smtp.gmail.com:587).
+  notification-worker:
+    <<: *endurecido
+    build: ${REPOS:-../..}/Servicios_RedVital/services/notifications
+    image: redvital/notification-worker:${VERSION:-qa}
+    environment:
+      KAFKA_SERVIDORES: kafka:9092
+      DONACION_URL: http://donation-service:8080
+      IDENTIDAD_URL: http://identity-service:8080
+      # Enlaces de los correos.
+      SITIO_URL: https://${DOMINIO:?}
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PUERTO: ${SMTP_PUERTO:-587}
+      SMTP_USUARIO: ${SMTP_USUARIO:-}
+      SMTP_REMITENTE: ${SMTP_REMITENTE:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75 -Djava.io.tmpdir=/tmp
+    secrets: [kafka_notificaciones, notificaciones_secreto_identidad, notificaciones_smtp_clave]
+    depends_on:
+      kafka-init: { condition: service_completed_successfully, required: false }
+    networks: [servicios]
+
+  # ---------------------------------------------------------------- Kafka
+  kafka:
+    build: ../kafka
+    image: redvital/kafka:4.3.1
+    restart: unless-stopped
+    environment:
+      KAFKA_HOST_INTERNO: kafka
+      KAFKA_HOST_EXTERNO: ${IP_VM_SERVICIOS:?}
+      KAFKA_PUERTO_EXTERNO: "9094"
+    secrets: [kafka_inicializacion]
+    volumes: ["datos-kafka:/var/lib/kafka"]
+    ports:
+      - "${IP_VM_SERVICIOS:?}:9094:9094"   # EXTERNO, para Kafbat en Tools
+      - "${IP_VM_SERVICIOS:?}:9404:9404"   # exportador JMX
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [servicios]
+
+  # Trabajo efímero e idempotente: usuarios SCRAM, temas del catálogo y ACL.
+  kafka-init:
+    image: redvital/kafka:4.3.1
+    restart: "no"
+    entrypoint: ["/opt/redvital/inicializar.sh"]
+    environment:
+      KAFKA_SERVIDOR: kafka:9092
+    secrets: [kafka_inicializacion, kafka_donacion, kafka_campanias, kafka_notificaciones, kafka_inspeccion]
+    depends_on:
+      kafka: { condition: service_healthy, required: false }
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging: *registro
+    networks: [servicios]
+
+  # ------------------------------------------------- Métricas (VM de Tools)
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--path.rootfs=/host"]
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes: ["/:/host:ro,rslave"]
+    ports: ["${IP_VM_SERVICIOS:?}:9100:9100"]
+    logging: *registro
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--docker_only=true", "--housekeeping_interval=30s"]
+    devices: ["/dev/kmsg"]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports: ["${IP_VM_SERVICIOS:?}:9180:8080"]
+    logging: *registro
+
+secrets:
+  postgres_ca: { file: "${SECRETOS_DIR:?}/postgres_ca" }
+  identidad_servicio: { file: "${SECRETOS_DIR:?}/identidad_servicio" }
+  identidad_clave_firma: { file: "${SECRETOS_DIR:?}/identidad_clave_firma" }
+  campana_servicio: { file: "${SECRETOS_DIR:?}/campana_servicio" }
+  donacion_servicio: { file: "${SECRETOS_DIR:?}/donacion_servicio" }
+  donacion_secreto_identidad: { file: "${SECRETOS_DIR:?}/donacion_secreto_identidad" }
+  donacion_clave_hmac: { file: "${SECRETOS_DIR:?}/donacion_clave_hmac" }
+  kafka_inicializacion: { file: "${SECRETOS_DIR:?}/kafka_inicializacion" }
+  kafka_donacion: { file: "${SECRETOS_DIR:?}/kafka_donacion" }
+  kafka_campanias: { file: "${SECRETOS_DIR:?}/kafka_campanias" }
+  kafka_notificaciones: { file: "${SECRETOS_DIR:?}/kafka_notificaciones" }
+  kafka_inspeccion: { file: "${SECRETOS_DIR:?}/kafka_inspeccion" }
+  notificaciones_secreto_identidad: { file: "${SECRETOS_DIR:?}/notificaciones_secreto_identidad" }
+  # La contraseña de aplicación de Gmail: la escribe a mano quien administra QA.
+  notificaciones_smtp_clave: { file: "${SECRETOS_DIR:?}/notificaciones_smtp_clave" }
+
+volumes:
+  datos-kafka:
+
+networks:
+  servicios:

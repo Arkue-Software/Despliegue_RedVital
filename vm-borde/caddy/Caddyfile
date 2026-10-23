@@ -1,0 +1,70 @@
+# RedVital — Caddy de borde.
+#   /api/*  -> APISIX (que valida el token y enruta al servicio)
+#   resto   -> la aplicación web (archivos estáticos)
+# Aquí se termina TLS, se ponen las cabeceras de seguridad y se limita el
+# cuerpo de las peticiones. Ningún servicio ni base es alcanzable desde aquí
+# salvo a través de APISIX.
+{
+	admin off
+	persist_config off
+	http_port 8080
+	https_port 8443
+	# Los puertos internos no son los públicos: la redirección a HTTPS se
+	# declara abajo, con el puerto público.
+	auto_https disable_redirects
+	# Si se entra por IP (https://10.x.x.x), el navegador no envía el nombre del
+	# sitio (SNI) y Caddy, dentro del contenedor, no ve la IP pública: se usa DOMINIO.
+	default_sni {$DOMINIO}
+	servers {
+		protocols h1 h2
+	}
+}
+
+http://{$DOMINIO} {
+	redir https://{host}{uri} permanent
+}
+
+https://{$DOMINIO} {
+	# QA: "internal" (CA local de Caddy). Producción: correo de la cuenta ACME.
+	tls {$TLS_MODO}
+
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		# Todo sale del propio origen: sin CDN, fuentes ni analítica de terceros.
+		# 'unsafe-inline' solo en estilos, por los atributos style de React y Radix.
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+		-Server
+		-Via
+	}
+
+	# Defensa en profundidad: APISIX ya responde 404 a /internal.
+	@interno path /api/internal /api/internal/*
+	respond @interno 404
+
+	handle /api/* {
+		# Sin trusted_proxies, Caddy descarta los X-Forwarded-* que manda el
+		# cliente y escribe la IP real: APISIX limita la tasa por ella.
+		reverse_proxy apisix:9080 {
+			header_down -Server
+		}
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

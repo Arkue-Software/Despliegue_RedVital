@@ -1,0 +1,18 @@
+# Exportador JMX de Prometheus como agente del propio proceso (entrada 88):
+# no añade contenedor. Solo métricas del broker, sin datos de mensajes.
+lowercaseOutputName: true
+rules:
+  - pattern: kafka.server<type=(.+), name=(.+), topic=(.+)><>(Count|Value)
+    name: kafka_server_$1_$2
+    labels:
+      topic: $3
+  - pattern: kafka.server<type=(.+), name=(.+)><>(Count|Value)
+    name: kafka_server_$1_$2
+  - pattern: kafka.controller<type=(.+), name=(.+)><>(Count|Value)
+    name: kafka_controller_$1_$2
+  - pattern: kafka.network<type=(.+), name=(.+), request=(.+)><>(Count|Mean)
+    name: kafka_network_$1_$2
+    labels:
+      request: $3
+  - pattern: java.lang<type=(.+)><>(\w+)
+    name: jvm_$1_$2

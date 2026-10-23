@@ -1,0 +1,10 @@
+# Secretos y archivos generados: nunca se versionan.
+secretos/
+ambientes/*.env
+!ambientes/*.env.example
+vm-tools/generado/
+secretos-*.tar.gz
+
+# Caché de Python
+__pycache__/
+*.pyc

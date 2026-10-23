@@ -1,0 +1,269 @@
+# RedVital — VM de datos (una por ambiente).
+#
+# Tres PostgreSQL 16 aisladas, una por servicio (DD, base por servicio), cada
+# una en su propia red. Publican su puerto SOLO en la IP de la VM y el
+# firewall (scripts/firewall.sh datos) lo abre únicamente a la VM de servicios.
+# Toda conexión de red exige TLS + SCRAM (postgres/pg_hba.conf).
+#
+#   docker compose --env-file ../ambientes/qa.env up -d --build
+#
+# Orden: base sana -> migración Flyway (propietario) -> credenciales de
+# servicio de Identidad -> semillas de QA (perfil "semillas").
+
+name: redvital-${AMBIENTE:?}-datos
+
+x-registro: &registro
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+x-postgres: &postgres
+  image: postgres:16
+  restart: unless-stopped
+  entrypoint: ["/redvital/entrypoint-tls.sh"]
+  command:
+    - postgres
+    - -c
+    - ssl=on
+    - -c
+    - ssl_cert_file=/var/lib/postgresql/tls/servidor.crt
+    - -c
+    - ssl_key_file=/var/lib/postgresql/tls/servidor.key
+    - -c
+    - ssl_min_protocol_version=TLSv1.2
+    - -c
+    - hba_file=/redvital/pg_hba.conf
+    - -c
+    - password_encryption=scram-sha-256
+    - -c
+    - log_connections=on
+  security_opt: [no-new-privileges:true]
+  shm_size: 256mb
+  logging: *registro
+
+x-flyway: &flyway
+  image: flyway/flyway:11
+  restart: "no"
+  entrypoint: ["/bin/sh", "-ec"]
+  security_opt: [no-new-privileges:true]
+  logging: *registro
+
+# Cliente psql efímero para las semillas: se conecta con TLS como propietario.
+x-semilla: &semilla
+  image: postgres:16
+  restart: "no"
+  entrypoint: ["/bin/sh", "-ec"]
+  security_opt: [no-new-privileges:true]
+  logging: *registro
+
+services:
+  # ------------------------------------------------------------- Identidad
+  db-identidad:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: db_identidad
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superusuario_identidad
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      ROLES_PREFIJO: identidad
+    secrets: [postgres_superusuario_identidad, identidad_propietario, identidad_servicio, postgres_tls_cert, postgres_tls_key]
+    volumes:
+      - datos-identidad:/var/lib/postgresql/data
+      - ${REPOS:-../..}/BDs_RedVital/databases/identidad/00_roles.sql:/roles/00_roles.sql:ro
+      - ${REPOS:-../..}/BDs_RedVital/databases/init/roles.sh:/docker-entrypoint-initdb.d/roles.sh:ro
+      - ./postgres:/redvital:ro
+    ports: ["${IP_VM_DATOS:?}:5432:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "db_identidad"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [red-identidad]
+
+  migracion-identidad:
+    <<: *flyway
+    depends_on: { db-identidad: { condition: service_healthy } }
+    secrets: [identidad_propietario, postgres_ca]
+    volumes: ["${REPOS:-../..}/BDs_RedVital/databases/identidad/migraciones:/flyway/sql:ro"]
+    command:
+      - |
+        export FLYWAY_PASSWORD="$$(cat /run/secrets/identidad_propietario)"
+        exec flyway -url='jdbc:postgresql://db-identidad:5432/db_identidad?sslmode=verify-ca&sslrootcert=/run/secrets/postgres_ca' \
+          -user=identidad_propietario -locations=filesystem:/flyway/sql -validateMigrationNaming=true migrate
+    networks: [red-identidad]
+
+  # Credenciales máquina a máquina (gateway, donacion): en todo ambiente.
+  credenciales-identidad:
+    <<: *semilla
+    depends_on: { migracion-identidad: { condition: service_completed_successfully } }
+    secrets: [identidad_propietario, postgres_ca, credenciales_servicio]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/identidad_propietario)"
+        psql -v ON_ERROR_STOP=1 -q -f /run/secrets/credenciales_servicio \
+          "host=db-identidad dbname=db_identidad user=identidad_propietario sslmode=verify-ca sslrootcert=/run/secrets/postgres_ca"
+        echo "Credenciales de servicio aplicadas"
+    networks: [red-identidad]
+
+  semilla-identidad:
+    <<: *semilla
+    profiles: [semillas]
+    depends_on: { migracion-identidad: { condition: service_completed_successfully } }
+    secrets: [identidad_propietario, postgres_ca, semilla_identidad]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/identidad_propietario)"
+        psql -v ON_ERROR_STOP=1 -q -f /run/secrets/semilla_identidad \
+          "host=db-identidad dbname=db_identidad user=identidad_propietario sslmode=verify-ca sslrootcert=/run/secrets/postgres_ca"
+        echo "Cuentas sintéticas de QA aplicadas"
+    networks: [red-identidad]
+
+  # -------------------------------------------------------------- Campañas
+  db-campana:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: db_campana
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superusuario_campana
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      ROLES_PREFIJO: campana
+    secrets: [postgres_superusuario_campana, campana_propietario, campana_servicio, postgres_tls_cert, postgres_tls_key]
+    volumes:
+      - datos-campana:/var/lib/postgresql/data
+      - ${REPOS:-../..}/BDs_RedVital/databases/campanas/00_roles.sql:/roles/00_roles.sql:ro
+      - ${REPOS:-../..}/BDs_RedVital/databases/init/roles.sh:/docker-entrypoint-initdb.d/roles.sh:ro
+      - ./postgres:/redvital:ro
+    ports: ["${IP_VM_DATOS:?}:5433:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "db_campana"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [red-campana]
+
+  migracion-campana:
+    <<: *flyway
+    depends_on: { db-campana: { condition: service_healthy } }
+    secrets: [campana_propietario, postgres_ca]
+    volumes: ["${REPOS:-../..}/BDs_RedVital/databases/campanas/migraciones:/flyway/sql:ro"]
+    command:
+      - |
+        export FLYWAY_PASSWORD="$$(cat /run/secrets/campana_propietario)"
+        exec flyway -url='jdbc:postgresql://db-campana:5432/db_campana?sslmode=verify-ca&sslrootcert=/run/secrets/postgres_ca' \
+          -user=campana_propietario -locations=filesystem:/flyway/sql -validateMigrationNaming=true migrate
+    networks: [red-campana]
+
+  semilla-campana:
+    <<: *semilla
+    profiles: [semillas]
+    depends_on: { migracion-campana: { condition: service_completed_successfully } }
+    secrets: [campana_propietario, postgres_ca]
+    volumes: ["../semillas/qa/campanas.sql:/semillas/campanas.sql:ro"]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/campana_propietario)"
+        psql -v ON_ERROR_STOP=1 -q -f /semillas/campanas.sql \
+          "host=db-campana dbname=db_campana user=campana_propietario sslmode=verify-ca sslrootcert=/run/secrets/postgres_ca"
+        echo "Campañas de QA aplicadas"
+    networks: [red-campana]
+
+  # -------------------------------------------------------------- Donación
+  db-donacion:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: db_donacion
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superusuario_donacion
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      ROLES_PREFIJO: donacion
+    secrets: [postgres_superusuario_donacion, donacion_propietario, donacion_servicio, postgres_tls_cert, postgres_tls_key]
+    volumes:
+      - datos-donacion:/var/lib/postgresql/data
+      - ${REPOS:-../..}/BDs_RedVital/databases/donacion/00_roles.sql:/roles/00_roles.sql:ro
+      - ${REPOS:-../..}/BDs_RedVital/databases/init/roles.sh:/docker-entrypoint-initdb.d/roles.sh:ro
+      - ./postgres:/redvital:ro
+    ports: ["${IP_VM_DATOS:?}:5434:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "db_donacion"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [red-donacion]
+
+  migracion-donacion:
+    <<: *flyway
+    depends_on: { db-donacion: { condition: service_healthy } }
+    secrets: [donacion_propietario, postgres_ca]
+    volumes: ["${REPOS:-../..}/BDs_RedVital/databases/donacion/migraciones:/flyway/sql:ro"]
+    command:
+      - |
+        export FLYWAY_PASSWORD="$$(cat /run/secrets/donacion_propietario)"
+        exec flyway -url='jdbc:postgresql://db-donacion:5432/db_donacion?sslmode=verify-ca&sslrootcert=/run/secrets/postgres_ca' \
+          -user=donacion_propietario -locations=filesystem:/flyway/sql -validateMigrationNaming=true migrate
+    networks: [red-donacion]
+
+  semilla-donacion:
+    <<: *semilla
+    profiles: [semillas]
+    depends_on: { migracion-donacion: { condition: service_completed_successfully } }
+    secrets: [donacion_propietario, postgres_ca]
+    volumes: ["../semillas/qa/donacion.sql:/semillas/donacion.sql:ro"]
+    command:
+      - |
+        export PGPASSWORD="$$(cat /run/secrets/donacion_propietario)"
+        psql -v ON_ERROR_STOP=1 -q -f /semillas/donacion.sql \
+          "host=db-donacion dbname=db_donacion user=donacion_propietario sslmode=verify-ca sslrootcert=/run/secrets/postgres_ca"
+        echo "Umbrales de QA aplicados"
+    networks: [red-donacion]
+
+  # ------------------------------------------------- Métricas (VM de Tools)
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--path.rootfs=/host"]
+    pid: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes: ["/:/host:ro,rslave"]
+    ports: ["${IP_VM_DATOS:?}:9100:9100"]
+    logging: *registro
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    profiles: [metricas]
+    restart: unless-stopped
+    command: ["--docker_only=true", "--housekeeping_interval=30s"]
+    devices: ["/dev/kmsg"]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports: ["${IP_VM_DATOS:?}:9180:8080"]
+    logging: *registro
+
+secrets:
+  postgres_tls_cert: { file: "${SECRETOS_DIR:?}/postgres_tls_cert" }
+  postgres_tls_key: { file: "${SECRETOS_DIR:?}/postgres_tls_key" }
+  postgres_ca: { file: "${SECRETOS_DIR:?}/postgres_ca" }
+  postgres_superusuario_identidad: { file: "${SECRETOS_DIR:?}/postgres_superusuario_identidad" }
+  identidad_propietario: { file: "${SECRETOS_DIR:?}/identidad_propietario" }
+  identidad_servicio: { file: "${SECRETOS_DIR:?}/identidad_servicio" }
+  credenciales_servicio: { file: "${SECRETOS_DIR:?}/credenciales_servicio.sql" }
+  semilla_identidad: { file: "${SECRETOS_DIR:?}/semilla_identidad.sql" }
+  postgres_superusuario_campana: { file: "${SECRETOS_DIR:?}/postgres_superusuario_campana" }
+  campana_propietario: { file: "${SECRETOS_DIR:?}/campana_propietario" }
+  campana_servicio: { file: "${SECRETOS_DIR:?}/campana_servicio" }
+  postgres_superusuario_donacion: { file: "${SECRETOS_DIR:?}/postgres_superusuario_donacion" }
+  donacion_propietario: { file: "${SECRETOS_DIR:?}/donacion_propietario" }
+  donacion_servicio: { file: "${SECRETOS_DIR:?}/donacion_servicio" }
+
+volumes:
+  datos-identidad:
+  datos-campana:
+  datos-donacion:
+
+# Una red por base: un trabajo de migración solo alcanza su propia base.
+networks:
+  red-identidad:
+  red-campana:
+  red-donacion:

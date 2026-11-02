@@ -24,7 +24,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from extremo_a_extremo import Cliente, comprobar, esperar, resultados
+from extremo_a_extremo import PROYECTOS_SERVICIOS, Cliente, comprobar, esperar, leer_clave_qa, resultados
 
 SERVICIOS = ("identity-service", "institutional-service", "campaign-service", "donation-service", "notification-worker")
 # Un servicio que esperara al broker tardaría al menos max.block.ms (5 s).
@@ -62,13 +62,13 @@ def main():
     p.add_argument("--base", default="https://localhost")
     p.add_argument("--ca", required=True, help="raíz de la CA del borde (Caddy tls internal)")
     p.add_argument("--secretos", required=True)
-    p.add_argument("--ambiente", default="qa")
+    p.add_argument("--ambiente", default="qa", choices=sorted(PROYECTOS_SERVICIOS))
     p.add_argument("--segundos-caido", type=int, default=60, help="cuánto tiempo queda Kafka detenido")
     a = p.parse_args()
 
     contexto = ssl.create_default_context(cafile=a.ca)
-    clave_qa = open(f"{a.secretos}/clave_cuentas_qa").read().strip()
-    proyecto = f"redvital-{a.ambiente}-servicios"
+    clave_qa = leer_clave_qa(a.secretos)
+    proyecto = PROYECTOS_SERVICIOS[a.ambiente]
     kafka = f"{proyecto}-kafka-1"
     contenedores = {s: f"{proyecto}-{s}-1" for s in SERVICIOS}
 

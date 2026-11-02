@@ -33,7 +33,7 @@ import sys
 import time
 import uuid
 
-from extremo_a_extremo import AURORA, Cliente, comprobar, esperar, resultados
+from extremo_a_extremo import AURORA, PROYECTOS_SERVICIOS, Cliente, comprobar, esperar, leer_clave_qa, resultados
 
 PLAZO = 4.0
 
@@ -57,12 +57,12 @@ def main():
     p.add_argument("--base", default="https://localhost")
     p.add_argument("--ca", required=True, help="raíz de la CA del borde (Caddy tls internal)")
     p.add_argument("--secretos", required=True)
-    p.add_argument("--ambiente", default="qa")
+    p.add_argument("--ambiente", default="qa", choices=sorted(PROYECTOS_SERVICIOS))
     a = p.parse_args()
 
     contexto = ssl.create_default_context(cafile=a.ca)
-    clave_qa = open(f"{a.secretos}/clave_cuentas_qa").read().strip()
-    proyecto = f"redvital-{a.ambiente}-servicios"
+    clave_qa = leer_clave_qa(a.secretos)
+    proyecto = PROYECTOS_SERVICIOS[a.ambiente]
     donacion = f"{proyecto}-donation-service-1"
     institucional = f"{proyecto}-institutional-service-1"
     campanias = f"{proyecto}-campaign-service-1"

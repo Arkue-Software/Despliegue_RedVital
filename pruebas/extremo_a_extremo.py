@@ -21,6 +21,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
+
+# Las claves solo se leen de la carpeta de secretos de este repo, y el ambiente
+# solo puede ser uno de los conocidos: ningún argumento llega sin validar a un
+# archivo o a docker.
+SECRETOS = (Path(__file__).resolve().parent.parent / "secretos").resolve()
+PROYECTOS_SERVICIOS = {"qa": "redvital-qa-servicios", "produccion": "redvital-produccion-servicios"}
 
 CAMPANIA_VIGENTE = "d4000000-0000-4000-8000-000000000001"   # Aurora, publicada y vigente
 CAMPANIA_BORRADOR = "d4000000-0000-4000-8000-000000000003"  # Aurora, borrador
@@ -84,6 +91,14 @@ class Cliente:
         return estado
 
 
+def leer_clave_qa(directorio):
+    """La clave de las cuentas de QA, solo si el directorio está dentro de secretos/."""
+    ruta = (Path(directorio).resolve() / "clave_cuentas_qa").resolve()
+    if not ruta.is_relative_to(SECRETOS):
+        sys.exit(f"--secretos debe ser una carpeta dentro de {SECRETOS}")
+    return ruta.read_text().strip()
+
+
 def esperar(condicion, segundos=40):
     limite = time.time() + segundos
     while time.time() < limite:
@@ -102,7 +117,7 @@ def main():
     a = p.parse_args()
 
     contexto = ssl.create_default_context(cafile=a.ca)
-    clave_qa = open(f"{a.secretos}/clave_cuentas_qa").read().strip()
+    clave_qa = leer_clave_qa(a.secretos)
 
     print("1. Borde y seguridad")
     anonimo = Cliente(a.base, contexto)

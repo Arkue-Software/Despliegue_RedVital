@@ -30,8 +30,8 @@ Desde tu PC ya se comprobó que las cuatro VM responden por SSH (puerto 22). Por
 
 ```
  Navegador ──── 443 ────► Borde      10.43.98.220
- Borde ── 8080/8082/8083 ► Servicios 10.43.99.174
- Servicios ─ 5432/5433/5434 (TLS) ─► Datos 10.43.99.183
+ Borde ── 8080/8082/8083/8084 ► Servicios 10.43.99.174
+ Servicios ─ 5432/5433/5434/5435 (TLS) ─► Datos 10.43.99.183
  Tools 10.43.100.121 ── 9100/9180 (métricas) ─► Datos, Servicios y Borde
                      ── 9091 (APISIX) ────────► Borde
                      ── 8183, 9404, 9094 ─────► Servicios (Donación, Kafka)
@@ -362,7 +362,7 @@ nproc; free -h | head -2; swapon --show; df -h ~ | tail -1
 
 | VM | CPU | RAM | Disco libre | Por qué |
 |---|---|---|---|---|
-| Datos | 2 | 4 GB | 20 GB | Tres PostgreSQL |
+| Datos | 2 | 4 GB | 20 GB | Cuatro PostgreSQL |
 | Servicios | 4 | 8 GB | 30 GB | Kafka, Java, dos .NET; además compila |
 | Borde | 2 | 4 GB | 20 GB | Compila la web; comparte CPU con el runner de GitHub |
 | Tools | 2 | 4 GB | 20 GB | Prometheus guarda 15 días de métricas |
@@ -389,15 +389,15 @@ docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'; docker volume
 **Si aparecen contenedores o volúmenes `redvital-qa-…`**, hubo un intento anterior con otros secretos. Elimínalo en esa VM con el anexo C antes de seguir; si no, las bases rechazan las claves nuevas.
 
 ```bash
-sudo ss -ltnp | grep -E ':(80|443|3000|5432|5433|5434|8080|8082|8083|8183|9090|9091|9094|9100|9180|9404) '
+sudo ss -ltnp | grep -E ':(80|443|3000|5432|5433|5434|5435|8080|8082|8083|8084|8183|9090|9091|9094|9100|9180|9404) '
 ```
 
 **Qué esperar:** nada en los puertos de esa VM:
 
 | VM | Puertos que deben estar libres |
 |---|---|
-| Datos | 5432, 5433, 5434, 9100, 9180 |
-| Servicios | 8080, 8082, 8083, 8183, 9094, 9404, 9100, 9180 |
+| Datos | 5432, 5433, 5434, 5435, 9100, 9180 |
+| Servicios | 8080, 8082, 8083, 8084, 8183, 9094, 9404, 9100, 9180 |
 | Borde | 80, 443, 9091, 9100, 9180 |
 | Tools | 3000, 8080 y 9090 en `127.0.0.1` |
 
@@ -660,13 +660,13 @@ La primera vez descarga PostgreSQL, Flyway y los exportadores de métricas (cerc
 
 **Qué ocurre, en orden:**
 
-1. **Arrancan las tres PostgreSQL:** Identidad en `10.43.99.183:5432`, Campañas en `:5433` y Donación en `:5434`.
+1. **Arrancan las cuatro PostgreSQL:** Identidad en `10.43.99.183:5432`, Campañas en `:5433`, Donación en `:5434` e Institucional en `:5435`.
    - `entrypoint-tls.sh` prepara el certificado con los permisos que exige PostgreSQL.
    - `pg_hba.conf` rechaza toda conexión de red sin TLS.
    - La primera vez se crean el usuario propietario y el de servicio de cada base.
 2. **`migracion-*`** (Flyway) crea las tablas como propietario y termina.
 3. **`credenciales-identidad`** registra las huellas de las credenciales de APISIX y Donación.
-4. **`semilla-*`** carga las cuentas de prueba, cinco jornadas y los umbrales del banco de prueba.
+4. **`semilla-*`** carga las cuentas de prueba, cinco jornadas, los umbrales del banco de prueba y 22 instituciones ficticias. Los territorios (DIVIPOLA) los carga la migración de Institucional.
 5. **`node-exporter` y `cadvisor`** publican las métricas de la VM en 9100 y 9180.
 
 ### 4.3 Comprobar
@@ -676,7 +676,7 @@ docker compose -f vm-datos/docker-compose.yml --env-file ambientes/qa.env ps -a
 ```
 
 **Qué esperar:**
-- `db-identidad`, `db-campana` y `db-donacion` en `Up … (healthy)`;
+- `db-identidad`, `db-campana`, `db-donacion` y `db-institucional` en `Up … (healthy)`;
 - `migracion-*`, `credenciales-identidad` y `semilla-*` en `Exited (0)`;
 - `node-exporter` y `cadvisor` en `Up`.
 
@@ -707,7 +707,7 @@ cd ~/Downloads/RedVital/Despliegue_RedVital
 ### 5.1 Alcance hacia las bases
 
 ```bash
-nc -zv 10.43.99.183 5432; nc -zv 10.43.99.183 5433; nc -zv 10.43.99.183 5434
+nc -zv 10.43.99.183 5432; nc -zv 10.43.99.183 5433; nc -zv 10.43.99.183 5434; nc -zv 10.43.99.183 5435
 ```
 
 **Qué esperar:** `succeeded` tres veces. Si no, la VM de Datos no está arriba (paso 4).
@@ -730,6 +730,7 @@ La primera compilación tarda de 10 a 20 minutos: descarga las imágenes base y 
 2. **`kafka-init`** crea los usuarios, los temas y los permisos, y termina.
 3. **`identity-service`** se conecta por TLS a su base y publica su llave pública en `10.43.99.174:8080`.
 4. **`campaign-service` (`:8082`) y `donation-service` (`:8083`)** arrancan. Campañas publica por Kafka las jornadas sembradas, y Donación las recibe.
+5. **`institutional-service` (`:8084`)** arranca sin esperar a Kafka: no lo usa. Atiende territorios, instituciones, indicadores y la bitácora.
 
 ### 5.3 Comprobar
 
@@ -737,7 +738,7 @@ La primera compilación tarda de 10 a 20 minutos: descarga las imágenes base y 
 docker compose -f vm-servicios/docker-compose.yml --env-file ambientes/qa.env ps -a
 ```
 
-**Qué esperar:** los tres servicios y `kafka` en `(healthy)`, y `kafka-init` en `Exited (0)`. Un servicio puede tardar hasta 2 minutos en pasar a `healthy`.
+**Qué esperar:** los cuatro servicios, el trabajador de Notificaciones y `kafka` en `(healthy)`, y `kafka-init` en `Exited (0)`. Un servicio puede tardar hasta 2 minutos en pasar a `healthy`.
 
 ```bash
 curl -s http://10.43.99.174:8080/.well-known/jwks.json
@@ -778,7 +779,7 @@ cd ~/Downloads/RedVital/Despliegue_RedVital
 ### 6.1 Alcance hacia los servicios
 
 ```bash
-nc -zv 10.43.99.174 8080; nc -zv 10.43.99.174 8082; nc -zv 10.43.99.174 8083
+nc -zv 10.43.99.174 8080; nc -zv 10.43.99.174 8082; nc -zv 10.43.99.174 8083; nc -zv 10.43.99.174 8084
 ```
 
 **Qué esperar:** `succeeded` tres veces.
@@ -795,7 +796,7 @@ docker compose -f vm-borde/docker-compose.yml --env-file ambientes/qa.env up -d 
 
 **Qué ocurre:**
 - **`web`:** compila el front (de 3 a 5 minutos la primera vez) y lo sirve en un puerto interno.
-- **`apisix`:** carga sus rutas y resuelve `identity-service`, `campaign-service` y `donation-service` a `10.43.99.174`.
+- **`apisix`:** carga sus rutas y resuelve `identity-service`, `campaign-service`, `donation-service` e `institutional-service` a `10.43.99.174`.
 - **`caddy`:** escucha en 80 y 443. La primera vez crea su CA de QA y un certificado para `10.43.98.220`.
 
 ### 6.3 Comprobar
@@ -927,7 +928,7 @@ cd ~/Downloads/RedVital/Despliegue_RedVital && python3 pruebas/extremo_a_extremo
 - Kafka en ambos sentidos;
 - límite de inicios de sesión.
 
-**Qué esperar:** `46/46 comprobaciones correctas` la primera vez. Desde la segunda salen `45/45`: la campaña borrador ya quedó publicada y la prueba lo indica con `[--  ]`. Si vas a correrla otra vez, espera un minuto: la segunda corrida choca con el límite de 10 inicios de sesión por minuto, que es intencional.
+**Qué esperar:** `92/92 comprobaciones correctas` la primera vez. Desde la segunda salen `91/91`: la campaña borrador ya quedó publicada y la prueba lo indica con `[--  ]`. Si vas a correrla otra vez, espera un minuto: la segunda corrida choca con el límite de 10 inicios de sesión por minuto, que es intencional.
 
 ### 8.2 Prueba manual desde tu PC
 
@@ -958,8 +959,8 @@ La clave de las cuentas `@redvital.test` se ve en la VM de Servicios con `cat se
 
 | VM | Comando | Qué debe permitir |
 |---|---|---|
-| Datos | `scripts/firewall.sh qa datos --simular` | 5432–5434 solo desde `10.43.99.174`; 9100 y 9180 solo desde `10.43.100.121` |
-| Servicios | `scripts/firewall.sh qa servicios --simular` | 8080, 8082 y 8083 solo desde `10.43.98.220`; 9094, 9404, 8183, 9100 y 9180 solo desde `10.43.100.121` |
+| Datos | `scripts/firewall.sh qa datos --simular` | 5432–5435 solo desde `10.43.99.174`; 9100 y 9180 solo desde `10.43.100.121` |
+| Servicios | `scripts/firewall.sh qa servicios --simular` | 8080, 8082, 8083 y 8084 solo desde `10.43.98.220`; 9094, 9404, 8183, 9100 y 9180 solo desde `10.43.100.121` |
 | Borde | `scripts/firewall.sh qa borde --simular` | 80 y 443 para todos; 9091, 9100 y 9180 solo desde `10.43.100.121` |
 
 `--simular` solo imprime las reglas, sin aplicar nada. Cada puerto lleva una línea `RETURN` por origen permitido y luego un `DROP` para todos los demás.
@@ -1000,7 +1001,7 @@ sudo scripts/firewall.sh qa borde --instalar
 | VM de Tools | `nc -zv 10.43.99.183 9100` | `succeeded`: Tools sí lee las métricas |
 | VM de Tools | `nc -zvw3 10.43.99.183 5434` | `timed out`: Tools no llega a las bases |
 
-Después vuelve a correr la prueba automática (8.1): deben seguir saliendo todas correctas (45/45 desde la segunda corrida). Revisa también que Prometheus siga con sus 9 objetivos en `UP`.
+Después vuelve a correr la prueba automática (8.1): deben seguir saliendo todas correctas (91/91 desde la segunda corrida). Revisa también que Prometheus siga con sus 9 objetivos en `UP`.
 
 ### 9.4 Si algo quedó bloqueado por error
 
@@ -1029,7 +1030,7 @@ Todos los comandos se ejecutan desde `~/Downloads/RedVital/Despliegue_RedVital` 
 | Quiero… | Dónde | Comando |
 |---|---|---|
 | Desplegar un cambio de Donación | VM de Servicios | `docker compose -f vm-servicios/docker-compose.yml --env-file ambientes/qa.env up -d --build donation-service` |
-| Desplegar un cambio de Identidad o Campañas | VM de Servicios | El mismo, con `identity-service` o `campaign-service` |
+| Desplegar un cambio de Identidad, Campañas o Institucional | VM de Servicios | El mismo, con `identity-service`, `campaign-service` o `institutional-service` |
 | Aplicar migraciones nuevas | VM de Datos | `docker compose -f vm-datos/docker-compose.yml --env-file ambientes/qa.env up -d`. Hazlo **antes** de desplegar el servicio que las necesita. |
 | Desplegar un cambio del front | VM de Borde | `docker compose -f vm-borde/docker-compose.yml --env-file ambientes/qa.env up -d --build web` |
 | Cambiar rutas de APISIX | VM de Borde | `docker compose -f vm-borde/docker-compose.yml --env-file ambientes/qa.env restart apisix` |
@@ -1084,7 +1085,7 @@ Todos los comandos se ejecutan desde `~/Downloads/RedVital/Despliegue_RedVital` 
 | `postgres_ca_llave` | Llave privada de la CA: solo sirve para emitir otro certificado | Solo Servicios |
 | `identidad_clave_firma` | Llave RSA con que Identidad firma los tokens | Servicios |
 | `gateway-secreto-cliente` | Credencial de APISIX ante Identidad (reporte de denegaciones) | Borde |
-| `donacion_secreto_identidad` | Credencial de Donación ante Identidad (alta de cuentas de donante) | Servicios |
+| `identidad_llave_publica` | Parte pública de la llave de firma: con ella cada servicio valida los tokens sin consultar a Identidad | Servicios |
 | `credenciales_servicio.sql` | Huellas, no claves, de esas dos credenciales | Datos |
 | `donacion_clave_hmac` | Resume los documentos de identidad. **No se rota**: se perderían las búsquedas. | Servicios |
 | `kafka_*` | Administrador de Kafka y un usuario SCRAM por servicio | Servicios (`kafka_inspeccion` también en Tools) |
@@ -1141,7 +1142,7 @@ mkdir -p ~/.docker && cat > ~/.docker/config.json <<'EOF'
     "default": {
       "httpProxy": "http://PROXY:PUERTO",
       "httpsProxy": "http://PROXY:PUERTO",
-      "noProxy": "localhost,127.0.0.1,10.43.0.0/16,identity-service,campaign-service,donation-service,kafka"
+      "noProxy": "localhost,127.0.0.1,10.43.0.0/16,identity-service,campaign-service,donation-service,institutional-service,kafka"
     }
   }
 }

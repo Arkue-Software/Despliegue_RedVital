@@ -8,14 +8,16 @@ Composición de RedVital en contenedores: **3 VM por ambiente** (QA y producció
 ┌──────────────── VM de borde ────────────────┐
 │ caddy ──/api/*──► apisix      web (estático) │   TLS, cabeceras, 1 MiB, límite de tasa
 └──────────────────────┬──────────────────────┘
-                       │ 8080 / 8082 / 8083 (solo desde borde)
+                       │ 8080 / 8082 / 8083 / 8084 (solo desde borde)
 ┌────────────── VM de servicios ──────────────┐
-│ identity-service  campaign-service           │
-│ donation-service  kafka (+ kafka-init)       │   Campañas ⇄ Donación SOLO por Kafka
+│ identity-service       campaign-service      │
+│ donation-service       institutional-service │   entre servicios SOLO Kafka:
+│ notification-worker    kafka (+ kafka-init)  │   ninguno llama a otro
 └──────────────────────┬──────────────────────┘
-                       │ 5432 / 5433 / 5434 TLS (solo desde servicios)
+                       │ 5432 / 5433 / 5434 / 5435 TLS (solo desde servicios)
 ┌──────────────── VM de datos ────────────────┐
 │ db-identidad  db-campana  db-donacion        │   una base por servicio
+│ db-institucional                             │
 │ migraciones Flyway, semillas de QA           │
 └─────────────────────────────────────────────┘
 VM de Tools (compartida): Prometheus · Grafana · Kafbat, solo por túnel SSH
@@ -23,20 +25,20 @@ VM de Tools (compartida): Prometheus · Grafana · Kafbat, solo por túnel SSH
 
 | Carpeta | Contenido |
 |---|---|
-| `vm-datos/` | Tres PostgreSQL 16 con TLS obligatorio (`pg_hba.conf`: `hostssl` + SCRAM; sin TLS se rechaza), migraciones, credenciales de servicio y semillas |
-| `vm-servicios/` | Identidad, Campañas, Donación, Kafka 4.3.1 y su trabajo de inicialización |
+| `vm-datos/` | Cuatro PostgreSQL 16 con TLS obligatorio (`pg_hba.conf`: `hostssl` + SCRAM; sin TLS se rechaza), migraciones, credenciales de servicio y semillas |
+| `vm-servicios/` | Identidad, Institucional, Campañas, Donación, el trabajador de Notificaciones, Kafka 4.3.1 y su trabajo de inicialización |
 | `vm-borde/` | Caddy de borde, la web y APISIX 3.19 |
 | `vm-tools/` | Prometheus, Grafana y Kafbat |
 | `kafka/` | Imagen `redvital/kafka:4.3.1`: KRaft, SASL/SCRAM, ACL, catálogo de temas |
 | `ambientes/` | Un `.env` por ambiente con las IP de sus VM (sin secretos) |
-| `semillas/qa/` | Campañas (con su EV-03 en la bandeja) y umbrales sintéticos de QA |
+| `semillas/qa/` | Campañas (con su EV-03 en la bandeja), umbrales e instituciones sintéticas de QA |
 | `scripts/` | Copia del código a las VM, secretos, firewall y configuración de Tools |
 
 Los compose construyen desde los repos hermanos (`REPOS=../..`): `Servicios_RedVital`, `BDs_RedVital`, `FrontEnd`, `Tools_RedVital`. Cuando exista un registro de imágenes, basta con publicar las imágenes `redvital/*:<VERSION>` y desplegar con `up --no-build`.
 
 ## Seguridad
 
-- **La web solo habla con APISIX.** El navegador llama a `/api/v1/*` en el mismo origen; Caddy lo envía a APISIX, que valida el token (firma, emisor, vigencia, contra el JWKS de Identidad) y el rol de la ruta antes de enrutar. `/api/internal/*` responde 404 en Caddy y en APISIX.
+- **La web solo habla con APISIX.** El navegador llama a `/api/v1/*` en el mismo origen; Caddy lo envía a APISIX, que valida el token (firma, emisor, vigencia, contra el JWKS de Identidad; los servicios lo validan de nuevo con la llave pública montada como secreto, sin consultar a Identidad) y el rol de la ruta antes de enrutar. `/api/internal/*` responde 404 en Caddy y en APISIX.
 - **Puertos.** Cada puerto se publica solo en la IP de su VM, y `scripts/firewall.sh` lo abre únicamente al origen que lo necesita, en la cadena `DOCKER-USER` (ufw no ve los puertos de Docker). APISIX y la web no publican nada; Tools escucha solo en `127.0.0.1`.
 - **Secretos** como archivos en `/run/secrets`, generados por `scripts/generar-secretos.sh` en `secretos/<ambiente>/` (directorio `0700`, fuera de git). Nunca en variables de entorno ni en la imagen.
 - **Bases.** Una por servicio, con usuario propietario (migraciones) y usuario de servicio con permisos por columna. TLS 1.2+ obligatorio y verificación de la CA del ambiente desde los servicios (`verify-ca`).
@@ -53,8 +55,8 @@ Los compose construyen desde los repos hermanos (`REPOS=../..`): `Servicios_RedV
 
 | VM | Repos clonados (uno al lado del otro) | Puertos que publica |
 |---|---|---|
-| Datos | `Despliegue_RedVital`, `BDs_RedVital` | 5432, 5433, 5434 (servicios); 9100, 9180 (Tools) |
-| Servicios | `Despliegue_RedVital`, `Servicios_RedVital` | 8080, 8082, 8083 (borde); 9094, 9404, 8183, 9100, 9180 (Tools) |
+| Datos | `Despliegue_RedVital`, `BDs_RedVital` | 5432, 5433, 5434, 5435 (servicios); 9100, 9180 (Tools) |
+| Servicios | `Despliegue_RedVital`, `Servicios_RedVital` | 8080, 8082, 8083, 8084 (borde); 9094, 9404, 8183, 9100, 9180 (Tools) |
 | Borde | `Despliegue_RedVital`, `FrontEnd`, `Tools_RedVital` | 80, 443 (público); 9091, 9100, 9180 (Tools) |
 | Tools | `Despliegue_RedVital` | ninguno (127.0.0.1, por túnel SSH) |
 
@@ -142,13 +144,21 @@ Desde un equipo de pruebas con acceso al borde, con la raíz de la CA de QA (ver
 python3 pruebas/extremo_a_extremo.py --base https://qa.redvital.local --ca redvital-qa-raiz.crt --secretos secretos/qa
 ```
 
-Recorre el sistema solo por el borde (46 comprobaciones). Incluye el límite de 10 inicios de sesión por minuto: entre dos corridas, espera un minuto.
+Recorre el sistema solo por el borde (81 comprobaciones). Incluye el límite de 10 inicios de sesión por minuto: entre dos corridas, espera un minuto.
 
 Para comprobar que ningún servicio espera a Kafka, en la VM de servicios (detiene el broker 60 s y lo vuelve a encender):
 
 ```bash
 python3 pruebas/resiliencia_kafka.py --base https://qa.redvital.local --ca redvital-qa-raiz.crt --secretos secretos/qa
-``` El firewall se comprueba desde una máquina que NO debería llegar (debe agotar el tiempo) y desde la que sí:
+```
+
+Para comprobar que Institucional y quienes le preguntan no se esperan entre sí (detiene Donación y luego Institucional, y los vuelve a encender):
+
+```bash
+python3 pruebas/resiliencia_institucional.py --base https://qa.redvital.local --ca redvital-qa-raiz.crt --secretos secretos/qa
+```
+
+El firewall se comprueba desde una máquina que NO debería llegar (debe agotar el tiempo) y desde la que sí:
 
 ```bash
 nc -zvw3 IP_VM_DATOS 5434
@@ -156,7 +166,7 @@ nc -zvw3 IP_VM_DATOS 5434
 
 ## QA
 
-- `COMPOSE_PROFILES=semillas,metricas`. El perfil `semillas` aplica cuentas U3–U7, campañas y umbrales sintéticos. **Nunca en producción.**
+- `COMPOSE_PROFILES=semillas,metricas`. El perfil `semillas` aplica cuentas U3–U7, campañas, umbrales e instituciones sintéticas. **Nunca en producción.** La jerarquía territorial (DIVIPOLA) no es semilla: la carga la migración V001 de Institucional en todo ambiente.
 - **Cuentas de prueba** (todas con la clave de `secretos/qa/clave_cuentas_qa`):
 
 | Correo | Perfil | Jurisdicción |
@@ -185,6 +195,7 @@ Para probar el sistema completo en una máquina, todas las «VM» pueden ser el 
 
 ## Pendiente conocido
 
-- **Servicio Institucional:** no existe. Sin él no hay transferencias, bitácora ni nombres de banco, y U7 no tiene módulos.
+- **Transferencias y convocatorias (M5):** dependen del proceso de escalamiento, que no forma parte de esta versión.
+- **Tipo de una institución:** no cambia nunca. El DD lo permite mientras no custodie unidades, pero eso exigiría un contrato nuevo hacia Donación; queda propuesto para cuando se implemente M5.
 - **Cierre de campaña:** el catálogo de eventos del DD no tiene un `campaign-closed`. Donación valida las campañas por fechas; se propone un EV-08 a la Arquitecta.
 - **Registro de imágenes:** hoy cada VM construye. Con un registro, publicar `redvital/*:<VERSION>` y desplegar con `--no-build`.

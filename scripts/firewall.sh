@@ -82,12 +82,12 @@ ipt -A REDVITAL -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 case "$VM" in
   datos)
     # Bases: solo la VM de servicios. Métricas: solo Tools.
-    for puerto in 5432 5433 5434; do permitir "$DATOS" "$puerto" "$SERVICIOS"; done
+    for puerto in 5432 5433 5434 5435; do permitir "$DATOS" "$puerto" "$SERVICIOS"; done
     for puerto in 9100 9180; do permitir "$DATOS" "$puerto" "$TOOLS"; done
     ;;
   servicios)
     # Upstreams de APISIX: solo la VM de borde.
-    for puerto in 8080 8082 8083; do permitir "$SERVICIOS" "$puerto" "$BORDE"; done
+    for puerto in 8080 8082 8083 8084; do permitir "$SERVICIOS" "$puerto" "$BORDE"; done
     # Kafka EXTERNO (Kafbat), JMX, métricas de Donación y exportadores: solo Tools.
     for puerto in 9094 9404 8183 9100 9180; do permitir "$SERVICIOS" "$puerto" "$TOOLS"; done
     ;;

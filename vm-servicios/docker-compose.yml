@@ -1,11 +1,13 @@
 # RedVital — VM de servicios (una por ambiente).
 #
-# Identidad, Campañas, Donación, el trabajador de Notificaciones y el broker
-# Kafka. Los servicios se hablan por la red del compose; entre Campañas y
-# Donación SOLO hay Kafka (ADR-018).
+# Identidad, Institucional, Campañas, Donación, el trabajador de Notificaciones
+# y el broker Kafka. Ningún servicio llama a otro: entre servicios SOLO hay
+# Kafka (ADR-018). Cada uno valida los tokens con la llave pública de Identidad,
+# montada como secreto (identidad_llave_publica), sin preguntarle nada.
 #
 # Publicado en la IP de la VM, y abierto por el firewall a:
-#   VM de borde  -> 8080 Identidad, 8082 Campañas, 8083 Donación (upstreams de APISIX)
+#   VM de borde  -> 8080 Identidad, 8082 Campañas, 8083 Donación, 8084 Institucional
+#                   (upstreams de APISIX)
 #   VM de Tools  -> 9094 Kafka EXTERNO (Kafbat), 9404 JMX de Kafka, 8183 métricas
 #                   de Donación, 9100/9180 exportadores
 # Las bases están en la VM de datos: los servicios llegan con TLS (verify-ca).
@@ -43,8 +45,14 @@ services:
       ConnectionStrings__Identidad: "Host=${IP_VM_DATOS:?};Port=5432;Database=db_identidad;Username=identidad_servicio;${DB_SSL_NPGSQL}"
       Jwt__RutaSecretoFirma: /run/secrets/identidad_clave_firma
       Jwt__JwksUriInterna: http://identity-service:8080/.well-known/jwks.json
-    secrets: [identidad_servicio, identidad_clave_firma, postgres_ca]
+      # Su serie de auditoría sale por EV-10 hacia la bitácora de Institucional.
+      Kafka__Habilitado: "true"
+      Kafka__Servidores: kafka:9092
+      Kafka__Usuario: identidad
+    secrets: [identidad_servicio, identidad_clave_firma, kafka_identidad, postgres_ca]
     ports: ["${IP_VM_SERVICIOS:?}:8080:8080"]
+    depends_on:
+      kafka-init: { condition: service_completed_successfully, required: false }
     networks: [servicios]
 
   campaign-service:
@@ -57,10 +65,9 @@ services:
       Kafka__Habilitado: "true"
       Kafka__Servidores: kafka:9092
       Kafka__Usuario: campanias
-    secrets: [campana_servicio, kafka_campanias, postgres_ca]
+    secrets: [campana_servicio, kafka_campanias, identidad_llave_publica, postgres_ca]
     ports: ["${IP_VM_SERVICIOS:?}:8082:8080"]
     depends_on:
-      identity-service: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully, required: false }
     networks: [servicios]
 
@@ -74,29 +81,45 @@ services:
       DB_NAME: db_donacion
       DB_PARAMETROS: ${DB_SSL_JDBC}
       KAFKA_SERVIDORES: kafka:9092
-      IDENTIDAD_URL: http://identity-service:8080
-      JWT_JWKS_URI: http://identity-service:8080/.well-known/jwks.json
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75 -Djava.io.tmpdir=/tmp
-    secrets: [donacion_servicio, kafka_donacion, donacion_secreto_identidad, donacion_clave_hmac, postgres_ca]
+    secrets: [donacion_servicio, kafka_donacion, identidad_llave_publica, donacion_clave_hmac, postgres_ca]
     ports:
       - "${IP_VM_SERVICIOS:?}:8083:8080"
       - "${IP_VM_SERVICIOS:?}:8183:8081"   # /actuator/prometheus, solo para Tools
     depends_on:
-      identity-service: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully, required: false }
     networks: [servicios]
 
-  # Trabajador de Notificaciones (DD, Sección 9): consume EV-02 y entrega los
-  # avisos por correo. Sin base de datos y sin puertos publicados; solo sale a
-  # internet hacia el proveedor SMTP (en QA, smtp.gmail.com:587).
+  # Servicio Institucional (DD, Sección 7): territorios, instituciones,
+  # indicadores (M7) y la bitácora compuesta (ST2). Publica cada alta o cambio
+  # de institución (EV-07) y compone indicadores y bitácora con lo que recibe
+  # por Kafka (EV-09 y EV-10).
+  institutional-service:
+    <<: *endurecido
+    build: ${REPOS:-../..}/Servicios_RedVital/services/institutional
+    image: redvital/institutional-service:${VERSION:-qa}
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_AMBIENTE:-QA}
+      ConnectionStrings__Institucional: "Host=${IP_VM_DATOS:?};Port=5435;Database=db_institucional;Username=institucional_servicio;${DB_SSL_NPGSQL}"
+      Kafka__Habilitado: "true"
+      Kafka__Servidores: kafka:9092
+      Kafka__Usuario: institucional
+    secrets: [institucional_servicio, kafka_institucional, identidad_llave_publica, postgres_ca]
+    ports: ["${IP_VM_SERVICIOS:?}:8084:8080"]
+    depends_on:
+      kafka-init: { condition: service_completed_successfully, required: false }
+    networks: [servicios]
+
+  # Trabajador de Notificaciones (DD, Sección 9): consume EV-02, que trae el
+  # correo y el nombre del destinatario, y entrega los avisos por correo. Sin
+  # base de datos, sin puertos publicados y sin llamar a ningún servicio; solo
+  # sale a internet hacia el proveedor SMTP (en QA, smtp.gmail.com:587).
   notification-worker:
     <<: *endurecido
     build: ${REPOS:-../..}/Servicios_RedVital/services/notifications
     image: redvital/notification-worker:${VERSION:-qa}
     environment:
       KAFKA_SERVIDORES: kafka:9092
-      DONACION_URL: http://donation-service:8080
-      IDENTIDAD_URL: http://identity-service:8080
       # Enlaces de los correos.
       SITIO_URL: https://${DOMINIO:?}
       SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
@@ -105,7 +128,7 @@ services:
       SMTP_REMITENTE: ${SMTP_REMITENTE:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75 -Djava.io.tmpdir=/tmp
-    secrets: [kafka_notificaciones, notificaciones_secreto_identidad, notificaciones_smtp_clave]
+    secrets: [kafka_notificaciones, notificaciones_smtp_clave]
     depends_on:
       kafka-init: { condition: service_completed_successfully, required: false }
     networks: [servicios]
@@ -136,7 +159,8 @@ services:
     entrypoint: ["/opt/redvital/inicializar.sh"]
     environment:
       KAFKA_SERVIDOR: kafka:9092
-    secrets: [kafka_inicializacion, kafka_donacion, kafka_campanias, kafka_notificaciones, kafka_inspeccion]
+    secrets: [kafka_inicializacion, kafka_donacion, kafka_campanias, kafka_notificaciones, kafka_identidad,
+              kafka_institucional, kafka_inspeccion]
     depends_on:
       kafka: { condition: service_healthy, required: false }
     cap_drop: [ALL]
@@ -177,16 +201,18 @@ secrets:
   postgres_ca: { file: "${SECRETOS_DIR:?}/postgres_ca" }
   identidad_servicio: { file: "${SECRETOS_DIR:?}/identidad_servicio" }
   identidad_clave_firma: { file: "${SECRETOS_DIR:?}/identidad_clave_firma" }
+  identidad_llave_publica: { file: "${SECRETOS_DIR:?}/identidad_llave_publica" }
   campana_servicio: { file: "${SECRETOS_DIR:?}/campana_servicio" }
   donacion_servicio: { file: "${SECRETOS_DIR:?}/donacion_servicio" }
-  donacion_secreto_identidad: { file: "${SECRETOS_DIR:?}/donacion_secreto_identidad" }
+  institucional_servicio: { file: "${SECRETOS_DIR:?}/institucional_servicio" }
   donacion_clave_hmac: { file: "${SECRETOS_DIR:?}/donacion_clave_hmac" }
   kafka_inicializacion: { file: "${SECRETOS_DIR:?}/kafka_inicializacion" }
   kafka_donacion: { file: "${SECRETOS_DIR:?}/kafka_donacion" }
   kafka_campanias: { file: "${SECRETOS_DIR:?}/kafka_campanias" }
   kafka_notificaciones: { file: "${SECRETOS_DIR:?}/kafka_notificaciones" }
+  kafka_identidad: { file: "${SECRETOS_DIR:?}/kafka_identidad" }
+  kafka_institucional: { file: "${SECRETOS_DIR:?}/kafka_institucional" }
   kafka_inspeccion: { file: "${SECRETOS_DIR:?}/kafka_inspeccion" }
-  notificaciones_secreto_identidad: { file: "${SECRETOS_DIR:?}/notificaciones_secreto_identidad" }
   # La contraseña de aplicación de Gmail: la escribe a mano quien administra QA.
   notificaciones_smtp_clave: { file: "${SECRETOS_DIR:?}/notificaciones_smtp_clave" }
 

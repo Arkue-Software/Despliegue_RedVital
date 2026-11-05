@@ -96,7 +96,7 @@ services:
   # por Kafka (EV-09 y EV-10).
   institutional-service:
     <<: *endurecido
-    build: ${REPOS:-../..}/institutional
+    build: ${REPOS:-../..}/Servicios_RedVital/services/institutional
     image: redvital/institutional-service:${VERSION:-qa}
     environment:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_AMBIENTE:-QA}

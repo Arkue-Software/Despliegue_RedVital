@@ -50,7 +50,7 @@ ENV="$RAIZ/ambientes/$AMBIENTE.env"
 IP_VM_DATOS=$(grep -E '^IP_VM_DATOS=' "$ENV" | cut -d= -f2)
 
 echo "1/5 Bases de datos (superusuario, propietario y servicio de cada base)"
-for base in identidad campana donacion; do
+for base in identidad campana donacion institucional notifications; do
   secreto "postgres_superusuario_$base"
   secreto "${base}_propietario"
   secreto "${base}_servicio"
@@ -67,7 +67,7 @@ if [ ! -s "$DIR/postgres_ca" ]; then
 fi
 if [ ! -s "$DIR/postgres_tls_cert" ]; then
   extension=$(mktemp)
-  printf 'subjectAltName=IP:%s,DNS:db-identidad,DNS:db-campana,DNS:db-donacion,DNS:localhost\nextendedKeyUsage=serverAuth\n' \
+  printf 'subjectAltName=IP:%s,DNS:db-identidad,DNS:db-campana,DNS:db-donacion,DNS:db-institucional,DNS:db-notifications,DNS:localhost\nextendedKeyUsage=serverAuth\n' \
     "$IP_VM_DATOS" > "$extension"
   openssl req -newkey rsa:3072 -nodes -keyout "$DIR/postgres_tls_key" -out "$DIR/postgres_tls.csr" \
     -subj "/O=RedVital/CN=$IP_VM_DATOS" 2>/dev/null
@@ -78,15 +78,19 @@ if [ ! -s "$DIR/postgres_tls_cert" ]; then
 fi
 chmod 644 "$DIR/postgres_ca" "$DIR/postgres_tls_cert" "$DIR/postgres_tls_key"
 
-echo "3/5 Identidad (llave de firma RS256 y credenciales de servicio)"
+echo "3/5 Identidad (llave de firma RS256, su parte pública y la credencial del gateway)"
 if [ ! -s "$DIR/identidad_clave_firma" ]; then
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$DIR/identidad_clave_firma" 2>/dev/null
   echo "  creada  llave de firma"
 fi
 chmod 644 "$DIR/identidad_clave_firma"
+# Los demás servicios validan los tokens con esta llave pública, montada como
+# secreto: ninguno le pregunta nada a Identidad. Se deriva siempre de la
+# privada, así que rotar la llave de firma la actualiza.
+openssl rsa -in "$DIR/identidad_clave_firma" -pubout -out "$DIR/identidad_llave_publica" 2>/dev/null
+chmod 644 "$DIR/identidad_llave_publica"
+echo "  derivada identidad_llave_publica"
 secreto gateway-secreto-cliente 48
-secreto donacion_secreto_identidad 48
-secreto notificaciones_secreto_identidad 48
 secreto donacion_clave_hmac 64
 if [ "$AMBIENTE" = qa ]; then
   # Clave común de las cuentas sintéticas U3–U7 de QA. Se lee de este archivo.
@@ -94,7 +98,7 @@ if [ "$AMBIENTE" = qa ]; then
 fi
 
 echo "4/5 Kafka (administrador y un usuario SCRAM por servicio)"
-for usuario in inicializacion donacion campanias notificaciones inspeccion; do
+for usuario in inicializacion donacion campanias notificaciones identidad institucional inspeccion; do
   secreto "kafka_$usuario"
 done
 # La contraseña SMTP no se genera: es la contraseña de aplicación de la cuenta de
@@ -107,14 +111,13 @@ fi
 chmod 644 "$DIR/notificaciones_smtp_clave"
 
 echo "5/5 Semillas de Identidad (huellas ASP.NET, nunca la credencial en claro)"
-# Se regenera también si a un ambiente anterior le falta el cliente notificaciones.
-if [ ! -s "$DIR/credenciales_servicio.sql" ] || ! grep -q "'notificaciones'" "$DIR/credenciales_servicio.sql" \
+# Solo el gateway tiene credencial de servicio: entre servicios todo pasa por
+# Kafka. Se regenera si un ambiente anterior todavía da credencial a otros.
+if [ ! -s "$DIR/credenciales_servicio.sql" ] || ! grep -q "activa = FALSE" "$DIR/credenciales_servicio.sql" \
    || { [ "$AMBIENTE" = qa ] && [ ! -s "$DIR/semilla_identidad.sql" ]; }; then
   GATEWAY_SECRETO=$(cat "$DIR/gateway-secreto-cliente") \
-  DONACION_SECRETO=$(cat "$DIR/donacion_secreto_identidad") \
-  NOTIFICACIONES_SECRETO=$(cat "$DIR/notificaciones_secreto_identidad") \
   CLAVE_CUENTAS=$( [ "$AMBIENTE" = qa ] && cat "$DIR/clave_cuentas_qa" || true ) \
-  docker run --rm -e GATEWAY_SECRETO -e DONACION_SECRETO -e NOTIFICACIONES_SECRETO -e CLAVE_CUENTAS \
+  docker run --rm -e GATEWAY_SECRETO -e CLAVE_CUENTAS \
     -v redvital-nuget:/root/.nuget/packages \
     -v "$REPOS/Servicios_RedVital/services/identity/herramientas/LlaveDePrueba:/fuente:ro" \
     -v "$DIR:/salida" \
@@ -122,12 +125,12 @@ if [ ! -s "$DIR/credenciales_servicio.sql" ] || ! grep -q "'notificaciones'" "$D
       cp -r /fuente /tmp/herramienta && rm -rf /tmp/herramienta/obj /tmp/herramienta/bin
       dotnet build /tmp/herramienta -c Release -o /tmp/llave --nologo -v q >/dev/null
       {
-        echo "-- Credenciales de servicio (gateway, donacion, notificaciones). Generado por generar-secretos.sh."
-        dotnet /tmp/llave/LlaveDePrueba.dll credencial-servicio --cliente gateway --secreto "$GATEWAY_SECRETO" | grep "^INSERT"
-        dotnet /tmp/llave/LlaveDePrueba.dll credencial-servicio --cliente donacion --secreto "$DONACION_SECRETO" | grep "^INSERT"
-        dotnet /tmp/llave/LlaveDePrueba.dll credencial-servicio --cliente notificaciones --secreto "$NOTIFICACIONES_SECRETO" | grep "^INSERT"
-      } | sed "s/);\$/) ON CONFLICT (cliente) DO UPDATE SET secreto_hash = EXCLUDED.secreto_hash, activa = TRUE;/" \
-        > /salida/credenciales_servicio.sql
+        echo "-- Credencial de servicio del gateway. Generado por generar-secretos.sh."
+        dotnet /tmp/llave/LlaveDePrueba.dll credencial-servicio --cliente gateway --secreto "$GATEWAY_SECRETO" | grep "^INSERT" \
+          | sed "s/);\$/) ON CONFLICT (cliente) DO UPDATE SET secreto_hash = EXCLUDED.secreto_hash, activa = TRUE;/"
+        echo "-- Donación y Notificaciones ya no piden tokens: sus credenciales anteriores quedan inactivas."
+        echo "UPDATE credencial_servicio SET activa = FALSE WHERE cliente IN ('"'"'donacion'"'"', '"'"'notificaciones'"'"');"
+      } > /salida/credenciales_servicio.sql
       if [ -n "$CLAVE_CUENTAS" ]; then
         dotnet /tmp/llave/LlaveDePrueba.dll semilla-identidad --clave "$CLAVE_CUENTAS" > /salida/semilla_identidad.sql
       fi

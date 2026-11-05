@@ -65,6 +65,7 @@ services:
       - "identity-service:${IP_VM_SERVICIOS:?}"
       - "campaign-service:${IP_VM_SERVICIOS:?}"
       - "donation-service:${IP_VM_SERVICIOS:?}"
+      - "institutional-service:${IP_VM_SERVICIOS:?}"
     ports:
       - "${IP_VM_BORDE:?}:9091:9091"   # métricas de APISIX, solo para Tools
     ulimits:

@@ -30,7 +30,7 @@ done
 $BIN/kafka-broker-api-versions.sh --bootstrap-server "$SERVIDOR" --command-config "$CLIENTE" >/dev/null
 
 echo "1/3 Usuarios SCRAM"
-for usuario in donacion campanias notificaciones inspeccion; do
+for usuario in donacion campanias notificaciones identidad institucional inspeccion; do
   if [ -s "$SECRETOS/kafka_$usuario" ]; then
     $BIN/kafka-configs.sh --bootstrap-server "$SERVIDOR" --command-config "$CLIENTE" --alter \
       --entity-type users --entity-name "$usuario" \
@@ -42,12 +42,13 @@ for usuario in donacion campanias notificaciones inspeccion; do
 done
 
 echo "2/3 Temas"
-grep -vE '^\s*(#|$)' /opt/redvital/catalogo-temas.conf | while read -r tema particiones retencion; do
+grep -vE '^\s*(#|$)' /opt/redvital/catalogo-temas.conf | while read -r tema particiones retencion limpieza; do
+  limpieza=${limpieza:-delete}
   $BIN/kafka-topics.sh --bootstrap-server "$SERVIDOR" --command-config "$CLIENTE" --create --if-not-exists \
     --topic "$tema" --partitions "$particiones" --replication-factor 1 \
-    --config retention.ms="$retencion" --config cleanup.policy=delete >/dev/null
+    --config retention.ms="$retencion" --config cleanup.policy="$limpieza" >/dev/null
   $BIN/kafka-configs.sh --bootstrap-server "$SERVIDOR" --command-config "$CLIENTE" --alter \
-    --entity-type topics --entity-name "$tema" --add-config retention.ms="$retencion" >/dev/null
+    --entity-type topics --entity-name "$tema" --add-config retention.ms="$retencion",cleanup.policy="$limpieza" >/dev/null
   echo "  $tema ($particiones particiones)"
 done
 
@@ -55,30 +56,55 @@ acl() { $BIN/kafka-acls.sh --bootstrap-server "$SERVIDOR" --command-config "$CLI
 EV01=redvital.donacion.donation-completed.v1
 EV02=redvital.donacion.notice-requested.v1
 EV03=redvital.campanias.campaign-published.v1
+EV07=redvital.institucional.institution-changed.v1
+EV09=redvital.donacion.indicators-updated.v1
+EV10_IDENTIDAD=redvital.identidad.audit-recorded.v1
+EV10_CAMPANIAS=redvital.campanias.audit-recorded.v1
+EV10_DONACION=redvital.donacion.audit-recorded.v1
 
 echo "3/3 ACL (DD V3.0, Tabla 30)"
-# donacion: escribe EV-01 y EV-02; lee EV-03; escribe y lee sus temas de
-# reintento y de mensajes muertos (los lee para reintentar y para alertar).
+# donacion: escribe EV-01, EV-02, EV-09 y su EV-10; lee EV-03 y EV-07; escribe
+# y lee sus temas de reintento y de mensajes muertos (los lee para reintentar
+# y para alertar).
 acl --allow-principal User:donacion --operation Write --operation Describe --topic "$EV01"
 acl --allow-principal User:donacion --operation Write --operation Describe --topic "$EV02"
+acl --allow-principal User:donacion --operation Write --operation Describe --topic "$EV09"
+acl --allow-principal User:donacion --operation Write --operation Describe --topic "$EV10_DONACION"
 acl --allow-principal User:donacion --operation Read --operation Describe --topic "$EV03"
+acl --allow-principal User:donacion --operation Read --operation Describe --topic "$EV07"
 acl --allow-principal User:donacion --operation Write --operation Read --operation Describe --topic "$EV03.donacion." --resource-pattern-type prefixed
+acl --allow-principal User:donacion --operation Write --operation Read --operation Describe --topic "$EV07.donacion." --resource-pattern-type prefixed
 acl --allow-principal User:donacion --operation Read --group donacion --resource-pattern-type prefixed
-# campanias: escribe EV-03; lee EV-01; escribe sus mensajes muertos.
+# campanias: escribe EV-03 y su EV-10; lee EV-01 y EV-07; escribe sus mensajes muertos.
 acl --allow-principal User:campanias --operation Write --operation Describe --topic "$EV03"
+acl --allow-principal User:campanias --operation Write --operation Describe --topic "$EV10_CAMPANIAS"
 acl --allow-principal User:campanias --operation Read --operation Describe --topic "$EV01"
+acl --allow-principal User:campanias --operation Read --operation Describe --topic "$EV07"
 acl --allow-principal User:campanias --operation Write --operation Describe --topic "$EV01.campanias." --resource-pattern-type prefixed
+acl --allow-principal User:campanias --operation Write --operation Describe --topic "$EV07.campanias." --resource-pattern-type prefixed
 acl --allow-principal User:campanias --operation Read --group campanias --resource-pattern-type prefixed
+# identidad: solo escribe su EV-10; no consume nada.
+acl --allow-principal User:identidad --operation Write --operation Describe --topic "$EV10_IDENTIDAD"
+# institucional: escribe EV-07; lee EV-09 y los tres EV-10; escribe sus mensajes muertos.
+acl --allow-principal User:institucional --operation Write --operation Describe --topic "$EV07"
+for tema in "$EV09" "$EV10_IDENTIDAD" "$EV10_CAMPANIAS" "$EV10_DONACION"; do
+  acl --allow-principal User:institucional --operation Read --operation Describe --topic "$tema"
+  acl --allow-principal User:institucional --operation Write --operation Describe --topic "$tema.institucional." --resource-pattern-type prefixed
+done
+acl --allow-principal User:institucional --operation Read --group institucional --resource-pattern-type prefixed
 # notificaciones: lee EV-02; escribe y lee sus temas de reintento y de
 # mensajes muertos.
 acl --allow-principal User:notificaciones --operation Read --operation Describe --topic "$EV02"
 acl --allow-principal User:notificaciones --operation Write --operation Read --operation Describe --topic "$EV02.notificaciones." --resource-pattern-type prefixed
 acl --allow-principal User:notificaciones --operation Read --group notificaciones --resource-pattern-type prefixed
-# inspeccion (Kafbat): lee todo salvo EV-02, que lleva identificadores de
-# donantes; sin grupo propio que confirme posiciones.
+# inspeccion (Kafbat): lee todo salvo EV-02, que lleva el correo y el nombre
+# del destinatario, y EV-10, que lleva actores y orígenes; sin grupo propio
+# que confirme posiciones.
 acl --allow-principal User:inspeccion --operation Read --operation Describe --operation DescribeConfigs --topic redvital. --resource-pattern-type prefixed
-acl --deny-principal User:inspeccion --operation Read --topic "$EV02"
-acl --deny-principal User:inspeccion --operation Read --topic "$EV02." --resource-pattern-type prefixed
+for tema in "$EV02" "$EV10_IDENTIDAD" "$EV10_CAMPANIAS" "$EV10_DONACION"; do
+  acl --deny-principal User:inspeccion --operation Read --topic "$tema"
+  acl --deny-principal User:inspeccion --operation Read --topic "$tema." --resource-pattern-type prefixed
+done
 acl --allow-principal User:inspeccion --operation Describe --group '*'
 acl --allow-principal User:inspeccion --operation Describe --operation DescribeConfigs --cluster
 

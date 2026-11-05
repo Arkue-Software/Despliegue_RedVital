@@ -25,8 +25,8 @@ Cómo funciona el ambiente de QA, cómo se entra, cómo se despliega un cambio, 
 
 | VM | IP | Nombre | Qué corre | Para qué sirve |
 |---|---|---|---|---|
-| **Datos** | `10.43.99.183` | `NBIG242` | Cuatro PostgreSQL 16: Identidad (5432), Campañas (5433), Donación (5434) e Institucional (5435). Además, migraciones Flyway y semillas de prueba. | Guarda los datos. Una base por servicio: ningún servicio lee la base de otro. |
-| **Servicios** | `10.43.99.174` | `NBIG233` | Identidad (8080), Campañas (8082), Donación (8083), Institucional (8084), Kafka (9094) y el trabajador de Notificaciones (sin puertos) | La lógica de negocio. Campañas y Donación solo se comunican por Kafka. Institucional guarda territorios e instituciones y compone indicadores y bitácora. Notificaciones envía los correos por Gmail. |
+| **Datos** | `10.43.99.183` | `NBIG242` | Cinco PostgreSQL 16: Identidad (5432), Campañas (5433), Donación (5434), Institucional (5435) y Notificaciones (5436). Además, migraciones Flyway y semillas de prueba. | Guarda los datos. Una base por servicio: ningún servicio lee la base de otro. |
+| **Servicios** | `10.43.99.174` | `NBIG233` | Identidad (8080), Campañas (8082), Donación (8083), Institucional (8084), Kafka (9094) y el trabajador de Notificaciones (sin puertos) | La lógica de negocio. Los servicios solo se comunican por Kafka. Institucional guarda territorios e instituciones y compone indicadores y bitácora. Notificaciones envía los correos por Gmail. |
 | **Borde** | `10.43.98.220` | `NBIG26` | Caddy (80/443), la aplicación web y APISIX | La única puerta pública. Caddy termina HTTPS y APISIX valida el token y el rol antes de pasar la petición. |
 | **Tools** | `10.43.100.121` | `NBIG418` | Prometheus, Grafana y Kafbat | Monitoreo y lectura de Kafka. Solo escucha en `127.0.0.1` de esa VM. |
 
@@ -52,7 +52,7 @@ Navegador ──HTTPS 443──► Caddy (Borde)
                            ├─ /api/*  ──► APISIX ──valida token y rol──► servicio en 10.43.99.174
                            └─ lo demás ─► web (archivos estáticos de React)
 
-Identidad / Institucional / Campañas / Donación ──TLS──► su propia base en 10.43.99.183
+Identidad / Institucional / Campañas / Donación / Notificaciones ──TLS──► su propia base en 10.43.99.183
 
 Ningún servicio llama a otro. Entre servicios todo pasa por Kafka:
 Campañas ──EV-03 campaña publicada──► Kafka ──► Donación          (copia local de campañas)
@@ -77,7 +77,7 @@ Identidad, Campañas, Donación ──EV-10 auditoría──► Kafka ──► 
    - **Falla Kafka:** ningún servicio se cae ni deja de atender. Los consumidores se reconectan solos y los servicios arrancan aunque Kafka no esté listo.
 8. **El Servicio Institucional** publica cada alta o cambio de institución (EV-07) y arma indicadores y bitácora con lo que le llega: Donación le manda cada minuto, si cambió, la fotografía de captación e inventario de cada banco (EV-09), y los otros tres servicios cada registro de auditoría (EV-10). Si Donación se cae, los indicadores muestran la última fotografía y dicen de cuándo es. Si Institucional se cae, el resto sigue igual: crear campañas y las consultas territoriales usan las copias locales, y lo que pase mientras tanto llega a la bitácora cuando vuelva.
 9. **Crear una cuenta de donante** lo hace la web en tres pasos, porque los servicios no se llaman entre sí: crea la cuenta en Identidad (`POST /api/v1/cuentas-donante`, pública), inicia la sesión y, con ella, crea el perfil en Donación (`POST /api/v1/donantes`). Donación rechaza a los menores de 18 años.
-10. **Los correos** los envía el trabajador de Notificaciones, nunca un servicio mientras atiende una petición. Al crear el perfil, Donación deja un aviso `cuenta_creada` en su bandeja, con el correo y el nombre del donante. El trabajador lo toma de Kafka y envía la confirmación por Gmail. El tema de los avisos solo lo lee Notificaciones (ni Kafbat puede leerlo) y se borra a los 7 días. Si Gmail no responde, el aviso espera en Kafka y sale cuando vuelva; el registro nunca espera al correo.
+10. **Los correos** los envía el trabajador de Notificaciones, nunca un servicio mientras atiende una petición. Al crear el perfil, Donación deja un aviso `cuenta_creada` en su bandeja, con el correo y el nombre del donante. El trabajador lo toma de Kafka y envía la confirmación por Gmail. El tema de los avisos solo lo lee Notificaciones (ni Kafbat puede leerlo) y se borra a los 7 días. Si Gmail no responde, el aviso espera en Kafka y sale cuando vuelva; el registro nunca espera al correo. El trabajador tiene su propia base (`db_notifications`), pero arranca y entrega avisos aunque esa base no responda.
 
 ### 1.3 Seguridad
 
@@ -100,7 +100,7 @@ Identidad, Campañas, Donación ──EV-10 auditoría──► Kafka ──► 
 | Borde `10.43.98.220` | 9091, 9100, 9180 (métricas) | Tools |
 | Servicios `10.43.99.174` | 8080, 8082, 8083, 8084 (API) | Borde |
 | Servicios `10.43.99.174` | 9094 (Kafka), 9404, 8183, 9100, 9180 (métricas) | Tools |
-| Datos `10.43.99.183` | 5432, 5433, 5434, 5435 (bases) | Servicios |
+| Datos `10.43.99.183` | 5432, 5433, 5434, 5435, 5436 (bases) | Servicios |
 | Datos `10.43.99.183` | 9100, 9180 (métricas) | Tools |
 | Cualquier VM | 22 (SSH) | Cualquiera en la red (no lo filtra el firewall de RedVital) |
 
@@ -338,7 +338,7 @@ Cambia la VM, el archivo y el nombre según el caso. `restart` no recompila: par
 
 ### 4.1 El flujo
 
-1. **En tu PC**, ten los cinco repos actualizados en la misma carpeta, uno al lado del otro: `BDs_RedVital`, `Servicios_RedVital`, `FrontEnd`, `Tools_RedVital` y `Despliegue_RedVital`.
+1. **En tu PC**, ten el código actualizado en la misma carpeta, uno al lado del otro: `BDs_RedVital`, `Servicios_RedVital`, `FrontEnd`, `Tools_RedVital` y `Despliegue_RedVital`. Desde `Despliegue_RedVital`, `scripts/clonar-repos.sh` lo arma desde GitHub (4.5).
 2. **Antes de desplegar**, pasa las pruebas del componente en tu PC (sección 6.2).
 3. **Copia el código a las VM.** Desde `Despliegue_RedVital`, en tu PC:
    ```bash
@@ -380,15 +380,18 @@ Todos los comandos van en la VM indicada, desde `~/Downloads/RedVital/Despliegue
 - **Las migraciones no se editan una vez aplicadas.** Flyway las verifica con una suma de control. Para corregir algo, crea una migración nueva (`V008__…`).
 - **Un cambio en `qa.env`** debe hacerse igual en las cuatro VM. Si cambió una IP, reinstala además el firewall (sección 5.5).
 
-### 4.3 Desplegar Institucional y la comunicación solo por Kafka
+### 4.3 Actualizar a Institucional, Kafka como único canal y la base de Notificaciones
 
-En este orden. Sirve tanto si el Servicio Institucional ya estaba desplegado como si no: cada paso solo crea lo que falta. Agrega una base, un servicio, dos puertos al firewall, temas y usuarios de Kafka, una llave pública y rutas nuevas al borde.
+En este orden. Sirve tanto si el Servicio Institucional ya estaba desplegado como si no: cada paso solo crea lo que falta y no borra datos. Agrega dos bases, un servicio, tres puertos al firewall, temas y usuarios de Kafka, una llave pública y rutas nuevas al borde.
 
-1. **En tu PC**, copia el código a las tres VM:
+1. **En tu PC**, arma las carpetas y copia el código a las tres VM. Cada componente es un repo de GitHub, y `clonar-repos.sh` lo pone en la ruta que esperan los compose, en la rama `develop` (ver 4.5):
+   ```bash
+   scripts/clonar-repos.sh
+   ```
    ```bash
    scripts/copiar-codigo.sh datos=10.43.99.183 servicios=10.43.99.174 borde=10.43.98.220
    ```
-2. **En Servicios**, crea los secretos que faltan: los de la base institucional, la llave pública de Identidad (`identidad_llave_publica`, que sale de la llave de firma) y los usuarios de Kafka `identidad` e `institucional`. También rehace `credenciales_servicio.sql`, que ahora deja inactivas las credenciales de Donación y Notificaciones ante Identidad. No cambia ninguna clave que ya exista.
+2. **En Servicios**, crea los secretos que faltan: los de las bases institucional y de notificaciones, la llave pública de Identidad (`identidad_llave_publica`, que sale de la llave de firma) y los usuarios de Kafka `identidad` e `institucional`. También rehace `credenciales_servicio.sql`, que deja inactivas las credenciales de Donación y Notificaciones ante Identidad. No cambia ninguna clave que ya exista.
    ```bash
    cd ~/Downloads/RedVital/Despliegue_RedVital && scripts/generar-secretos.sh qa && scripts/empaquetar-secretos.sh qa datos
    ```
@@ -397,14 +400,14 @@ En este orden. Sirve tanto si el Servicio Institucional ya estaba desplegado com
    cd ~/Downloads/RedVital/Despliegue_RedVital && scp estudiante@10.43.99.174:Downloads/RedVital/Despliegue_RedVital/secretos-qa-datos.tar.gz . && tar -xzf secretos-qa-datos.tar.gz && rm secretos-qa-datos.tar.gz
    ```
    Luego, en Servicios, borra el paquete: `rm secretos-qa-datos.tar.gz`.
-4. **En Datos**, migra las cuatro bases, aplica las credenciales y las semillas, y abre el puerto 5435 a Servicios:
+4. **En Datos**, migra las cinco bases, aplica las credenciales y las semillas, y abre los puertos 5435 y 5436 a Servicios:
    ```bash
    docker compose -f vm-datos/docker-compose.yml --env-file ambientes/qa.env --profile semillas up -d
    ```
    ```bash
    sudo scripts/firewall.sh qa datos
    ```
-   Cada `migracion-*` termina en `Exited (0)`: Identidad en la versión 5, Campañas en la 4, Donación en la 8 e Institucional en la 4. La semilla de Campañas renueva las fechas de las jornadas de QA, y la de Institucional deja en la bandeja el EV-07 de cada institución.
+   Cada `migracion-*` termina en `Exited (0)`: Identidad en la versión 5, Campañas en la 4, Donación en la 8, Institucional en la 4 y Notificaciones en la 3. La semilla de Campañas renueva las fechas de las jornadas de QA, y la de Institucional deja en la bandeja el EV-07 de cada institución.
 5. **En Servicios**, reconstruye todo, Kafka incluido (su catálogo de temas viene en la imagen), y abre el puerto 8084 a Borde:
    ```bash
    docker compose -f vm-servicios/docker-compose.yml --env-file ambientes/qa.env up -d --build
@@ -427,6 +430,25 @@ En este orden. Sirve tanto si el Servicio Institucional ya estaba desplegado com
 Las migraciones no se deshacen solas. Si la versión nueva aplicó una migración, la anterior debe tolerar ese esquema; si no, hace falta una migración correctiva.
 
 ---
+
+### 4.5 De dónde sale el código
+
+Cada componente es un repo de GitHub de la organización `Arkue-Software`, pero los compose lo buscan en una ruta fija junto a `Despliegue_RedVital`:
+
+| Repo | Carpeta |
+|---|---|
+| `identity`, `campaign`, `donation`, `institutional`, `notifications` | `Servicios_RedVital/services/<repo>` |
+| `databases` | `BDs_RedVital/databases` |
+| `frontend` | `FrontEnd/frontend-main` |
+| `tools` | `Tools_RedVital/tools` |
+
+`scripts/clonar-repos.sh` arma esas carpetas o las actualiza, en la rama `develop`. No clones un repo a mano sin indicar la rama: `main` solo tiene lo que ya pasó QA, y un repo sin entregas aprobadas trae únicamente el commit inicial, sin `Dockerfile`. Una carpeta con contenido que no sea un clon de ese repo no se toca: se avisa y se deja como está.
+
+`scripts/verificar-codigo.sh`, en cualquier VM o en tu PC, dice qué falta. `copiar-codigo.sh` lo corre antes de copiar:
+
+```bash
+scripts/verificar-codigo.sh servicios
+```
 
 ## 5. Verificar que todo funciona
 
@@ -579,7 +601,7 @@ pruebas/correr-pruebas.sh donacion web
 
 | Componente | Qué corre |
 |---|---|
-| `bds` | `BDs_RedVital/databases/pruebas/correr-local.sh`: migraciones de las tres bases, esquemas, aislamiento y permisos por columna |
+| `bds` | `BDs_RedVital/databases/pruebas/correr-local.sh`: migraciones de las cinco bases, esquemas, aislamiento y permisos por columna |
 | `identidad` | `dotnet test` de Identidad |
 | `campanas` | `dotnet test` de Campañas, con PostgreSQL y Kafka reales (Testcontainers) y las migraciones del repo de bases: el consumidor no se cae sin tema de mensajes muertos ni con la base caída |
 | `donacion` | `mvn verify` de Donación: unitarias, reglas de arquitectura (ArchUnit) e integración con PostgreSQL y Kafka reales (Testcontainers), incluidos los reintentos sin detener la partición, la base caída y los mensajes muertos |
@@ -794,6 +816,10 @@ Debe decir `succeeded`. Si se queda esperando, la red del laboratorio bloquea el
 | `429` | Límite de tasa | Espera un minuto. |
 | El inicio de sesión funciona, pero luego todo da 401 | Relojes desincronizados entre VM, o APISIX no llega a Identidad | `timedatectl` en cada VM (`System clock synchronized: yes`); `nc -zv 10.43.99.174 8080` desde Borde |
 | `/api/…` responde 502 o 504 | APISIX no alcanza un servicio | Estado de Servicios (3.1); `nc -zv 10.43.99.174 8083` desde Borde |
+| `additional privileges requested: pass "--allow=fs.read=…"` al construir | Falta la carpeta del servicio. Compose no dice que no existe | `scripts/verificar-codigo.sh servicios`; si falta, `scripts/clonar-repos.sh` en tu PC y copia el código (4.5). No cambies la ruta `build` del compose. |
+| `failed to read dockerfile: open Dockerfile: no such file or directory` | El repo se clonó en `main`, que solo tiene el commit inicial | Usa la rama `develop`: `scripts/clonar-repos.sh` (4.5). |
+| `invalid mount config for type "bind": bind source path does not exist: …/secretos/qa/<nombre>` | Falta ese secreto en esa VM | Pasos 2 y 3 de 4.3. El aviso `secret file … does not exist` que sale antes dice cuál es. |
+| `notification-worker` en `Restarting`, con `Connection to localhost:5432 refused` en el log | Imagen nueva con un compose sin `DB_HOST`: se actualizó Notificaciones sin actualizar Despliegue | Actualiza `Despliegue_RedVital` y sigue 4.3. |
 | `/api/v1/territorios`, `/instituciones`, `/indicadores` o `/auditoria` responden 503 y los demás funcionan | APISIX no conoce el host `institutional-service`, o el firewall no abre el 8084 | En Borde, `up -d apisix` (no `restart`); en Servicios, `sudo scripts/firewall.sh qa servicios`; `nc -zv 10.43.99.174 8084` desde Borde |
 | Los indicadores dicen «Donación todavía no ha enviado cifras» o una fecha vieja | EV-09 no llega: Donación o Kafka caídos, o el consumidor de Institucional detenido | Estado de `donation-service` y `institutional-service`; en Kafbat, el grupo `institucional` y el tema `redvital.donacion.indicators-updated.v1.institucional.dlt`. |
 | La bitácora dice que una serie está al día hasta hace rato | Ese servicio, o Kafka, no ha enviado sus registros | Estado del servicio y de Kafka. Los registros esperan en su bandeja y llegan solos. |

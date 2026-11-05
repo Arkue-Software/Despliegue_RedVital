@@ -112,13 +112,18 @@ services:
 
   # Trabajador de Notificaciones (DD, Sección 9): consume EV-02, que trae el
   # correo y el nombre del destinatario, y entrega los avisos por correo. Sin
-  # base de datos, sin puertos publicados y sin llamar a ningún servicio; solo
-  # sale a internet hacia el proveedor SMTP (en QA, smtp.gmail.com:587).
+  # puertos publicados y sin llamar a ningún servicio; solo sale a internet hacia
+  # el proveedor SMTP (en QA, smtp.gmail.com:587). Tiene su base en la VM de
+  # datos, pero arranca y entrega avisos aunque esa base no responda.
   notification-worker:
     <<: *endurecido
     build: ${REPOS:-../..}/Servicios_RedVital/services/notifications
     image: redvital/notification-worker:${VERSION:-qa}
     environment:
+      DB_HOST: ${IP_VM_DATOS:?}
+      DB_PORT: "5436"
+      DB_NAME: db_notifications
+      DB_PARAMETROS: ${DB_SSL_JDBC}
       KAFKA_SERVIDORES: kafka:9092
       # Enlaces de los correos.
       SITIO_URL: https://${DOMINIO:?}
@@ -128,7 +133,7 @@ services:
       SMTP_REMITENTE: ${SMTP_REMITENTE:-}
       SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75 -Djava.io.tmpdir=/tmp
-    secrets: [kafka_notificaciones, notificaciones_smtp_clave]
+    secrets: [notifications_servicio, kafka_notificaciones, notificaciones_smtp_clave, postgres_ca]
     depends_on:
       kafka-init: { condition: service_completed_successfully, required: false }
     networks: [servicios]
@@ -205,6 +210,7 @@ secrets:
   campana_servicio: { file: "${SECRETOS_DIR:?}/campana_servicio" }
   donacion_servicio: { file: "${SECRETOS_DIR:?}/donacion_servicio" }
   institucional_servicio: { file: "${SECRETOS_DIR:?}/institucional_servicio" }
+  notifications_servicio: { file: "${SECRETOS_DIR:?}/notifications_servicio" }
   donacion_clave_hmac: { file: "${SECRETOS_DIR:?}/donacion_clave_hmac" }
   kafka_inicializacion: { file: "${SECRETOS_DIR:?}/kafka_inicializacion" }
   kafka_donacion: { file: "${SECRETOS_DIR:?}/kafka_donacion" }

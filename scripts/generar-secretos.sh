@@ -50,7 +50,7 @@ ENV="$RAIZ/ambientes/$AMBIENTE.env"
 IP_VM_DATOS=$(grep -E '^IP_VM_DATOS=' "$ENV" | cut -d= -f2)
 
 echo "1/5 Bases de datos (superusuario, propietario y servicio de cada base)"
-for base in identidad campana donacion institucional; do
+for base in identidad campana donacion institucional notifications; do
   secreto "postgres_superusuario_$base"
   secreto "${base}_propietario"
   secreto "${base}_servicio"
@@ -67,7 +67,7 @@ if [ ! -s "$DIR/postgres_ca" ]; then
 fi
 if [ ! -s "$DIR/postgres_tls_cert" ]; then
   extension=$(mktemp)
-  printf 'subjectAltName=IP:%s,DNS:db-identidad,DNS:db-campana,DNS:db-donacion,DNS:db-institucional,DNS:localhost\nextendedKeyUsage=serverAuth\n' \
+  printf 'subjectAltName=IP:%s,DNS:db-identidad,DNS:db-campana,DNS:db-donacion,DNS:db-institucional,DNS:db-notifications,DNS:localhost\nextendedKeyUsage=serverAuth\n' \
     "$IP_VM_DATOS" > "$extension"
   openssl req -newkey rsa:3072 -nodes -keyout "$DIR/postgres_tls_key" -out "$DIR/postgres_tls.csr" \
     -subj "/O=RedVital/CN=$IP_VM_DATOS" 2>/dev/null

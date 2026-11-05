@@ -1,6 +1,6 @@
 # RedVital — VM de datos (una por ambiente).
 #
-# Cuatro PostgreSQL 16 aisladas, una por servicio (DD, base por servicio), cada
+# Cinco PostgreSQL 16 aisladas, una por servicio (DD, base por servicio), cada
 # una en su propia red. Publican su puerto SOLO en la IP de la VM y el
 # firewall (scripts/firewall.sh datos) lo abre únicamente a la VM de servicios.
 # Toda conexión de red exige TLS + SCRAM (postgres/pg_hba.conf).
@@ -262,6 +262,40 @@ services:
         echo "Instituciones de QA aplicadas"
     networks: [red-institucional]
 
+  # ------------------------------------------------------- Notificaciones
+  db-notifications:
+    <<: *postgres
+    environment:
+      POSTGRES_DB: db_notifications
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superusuario_notifications
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      ROLES_PREFIJO: notifications
+    secrets: [postgres_superusuario_notifications, notifications_propietario, notifications_servicio, postgres_tls_cert, postgres_tls_key]
+    volumes:
+      - datos-notifications:/var/lib/postgresql/data
+      - ${REPOS:-../..}/BDs_RedVital/databases/notifications/00_roles.sql:/roles/00_roles.sql:ro
+      - ${REPOS:-../..}/BDs_RedVital/databases/init/roles.sh:/docker-entrypoint-initdb.d/roles.sh:ro
+      - ./postgres:/redvital:ro
+    ports: ["${IP_VM_DATOS:?}:5436:5432"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "db_notifications"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [red-notifications]
+
+  migracion-notifications:
+    <<: *flyway
+    depends_on: { db-notifications: { condition: service_healthy } }
+    secrets: [notifications_propietario, postgres_ca]
+    volumes: ["${REPOS:-../..}/BDs_RedVital/databases/notifications/migraciones:/flyway/sql:ro"]
+    command:
+      - |
+        export FLYWAY_PASSWORD="$$(cat /run/secrets/notifications_propietario)"
+        exec flyway -url='jdbc:postgresql://db-notifications:5432/db_notifications?sslmode=verify-ca&sslrootcert=/run/secrets/postgres_ca' \
+          -user=notifications_propietario -locations=filesystem:/flyway/sql -validateMigrationNaming=true migrate
+    networks: [red-notifications]
+
   # ------------------------------------------------- Métricas (VM de Tools)
   node-exporter:
     image: prom/node-exporter:v1.9.1
@@ -309,12 +343,16 @@ secrets:
   postgres_superusuario_institucional: { file: "${SECRETOS_DIR:?}/postgres_superusuario_institucional" }
   institucional_propietario: { file: "${SECRETOS_DIR:?}/institucional_propietario" }
   institucional_servicio: { file: "${SECRETOS_DIR:?}/institucional_servicio" }
+  postgres_superusuario_notifications: { file: "${SECRETOS_DIR:?}/postgres_superusuario_notifications" }
+  notifications_propietario: { file: "${SECRETOS_DIR:?}/notifications_propietario" }
+  notifications_servicio: { file: "${SECRETOS_DIR:?}/notifications_servicio" }
 
 volumes:
   datos-identidad:
   datos-campana:
   datos-donacion:
   datos-institucional:
+  datos-notifications:
 
 # Una red por base: un trabajo de migración solo alcanza su propia base.
 networks:
@@ -322,3 +360,4 @@ networks:
   red-campana:
   red-donacion:
   red-institucional:
+  red-notifications:

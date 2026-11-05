@@ -61,11 +61,12 @@ donacion() {
 }
 
 notificaciones() {
-  # Unitarias e integración con Kafka real (Testcontainers) y SMTP en memoria (GreenMail).
+  # Unitarias e integración con Kafka y PostgreSQL reales (Testcontainers), las
+  # migraciones del repo databases y SMTP en memoria (GreenMail).
   docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
-    -v redvital-m2:/root/.m2 -v "$SERVICIOS/notifications:/src" \
+    -v redvital-m2:/root/.m2 -v "$SERVICIOS/notifications:/src" -v "$BDS:/bds:ro" \
     -e TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1 -w /src maven:3.9-eclipse-temurin-25 \
-    sh -c "mvn -B verify; r=\$?; $(devolver); exit \$r"
+    sh -c "mvn -B verify -Dredvital.migraciones.dir=/bds/notifications; r=\$?; $(devolver); exit \$r"
 }
 
 web() {

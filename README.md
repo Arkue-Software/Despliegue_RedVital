@@ -14,10 +14,10 @@ Composición de RedVital en contenedores: **3 VM por ambiente** (QA y producció
 │ donation-service       institutional-service │   entre servicios SOLO Kafka:
 │ notification-worker    kafka (+ kafka-init)  │   ninguno llama a otro
 └──────────────────────┬──────────────────────┘
-                       │ 5432 / 5433 / 5434 / 5435 TLS (solo desde servicios)
+                       │ 5432 / 5433 / 5434 / 5435 / 5436 TLS (solo desde servicios)
 ┌──────────────── VM de datos ────────────────┐
 │ db-identidad  db-campana  db-donacion        │   una base por servicio
-│ db-institucional                             │
+│ db-institucional  db-notifications           │
 │ migraciones Flyway, semillas de QA           │
 └─────────────────────────────────────────────┘
 VM de Tools (compartida): Prometheus · Grafana · Kafbat, solo por túnel SSH
@@ -25,14 +25,14 @@ VM de Tools (compartida): Prometheus · Grafana · Kafbat, solo por túnel SSH
 
 | Carpeta | Contenido |
 |---|---|
-| `vm-datos/` | Cuatro PostgreSQL 16 con TLS obligatorio (`pg_hba.conf`: `hostssl` + SCRAM; sin TLS se rechaza), migraciones, credenciales de servicio y semillas |
+| `vm-datos/` | Cinco PostgreSQL 16 con TLS obligatorio (`pg_hba.conf`: `hostssl` + SCRAM; sin TLS se rechaza), migraciones, credenciales de servicio y semillas |
 | `vm-servicios/` | Identidad, Institucional, Campañas, Donación, el trabajador de Notificaciones, Kafka 4.3.1 y su trabajo de inicialización |
 | `vm-borde/` | Caddy de borde, la web y APISIX 3.19 |
 | `vm-tools/` | Prometheus, Grafana y Kafbat |
 | `kafka/` | Imagen `redvital/kafka:4.3.1`: KRaft, SASL/SCRAM, ACL, catálogo de temas |
 | `ambientes/` | Un `.env` por ambiente con las IP de sus VM (sin secretos) |
 | `semillas/qa/` | Campañas (con su EV-03 en la bandeja), umbrales e instituciones sintéticas de QA |
-| `scripts/` | Copia del código a las VM, secretos, firewall y configuración de Tools |
+| `scripts/` | Armar las carpetas desde GitHub, copiar el código a las VM, secretos, firewall y configuración de Tools |
 
 Los compose construyen desde los repos hermanos (`REPOS=../..`): `Servicios_RedVital`, `BDs_RedVital`, `FrontEnd`, `Tools_RedVital`. Cuando exista un registro de imágenes, basta con publicar las imágenes `redvital/*:<VERSION>` y desplegar con `up --no-build`.
 
@@ -55,7 +55,7 @@ Los compose construyen desde los repos hermanos (`REPOS=../..`): `Servicios_RedV
 
 | VM | Repos clonados (uno al lado del otro) | Puertos que publica |
 |---|---|---|
-| Datos | `Despliegue_RedVital`, `BDs_RedVital` | 5432, 5433, 5434, 5435 (servicios); 9100, 9180 (Tools) |
+| Datos | `Despliegue_RedVital`, `BDs_RedVital` | 5432, 5433, 5434, 5435, 5436 (servicios); 9100, 9180 (Tools) |
 | Servicios | `Despliegue_RedVital`, `Servicios_RedVital` | 8080, 8082, 8083, 8084 (borde); 9094, 9404, 8183, 9100, 9180 (Tools) |
 | Borde | `Despliegue_RedVital`, `FrontEnd`, `Tools_RedVital` | 80, 443 (público); 9091, 9100, 9180 (Tools) |
 | Tools | `Despliegue_RedVital` | ninguno (127.0.0.1, por túnel SSH) |

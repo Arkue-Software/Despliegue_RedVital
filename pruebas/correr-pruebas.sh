@@ -5,7 +5,7 @@
 #   pruebas/correr-pruebas.sh                 todas
 #   pruebas/correr-pruebas.sh donacion web    solo esas
 #
-# Componentes: bds identidad campanas donacion notificaciones web gateway contratos secretos
+# Componentes: bds identidad campanas institucional donacion notificaciones web gateway contratos secretos
 #
 # Espera los repos uno al lado del otro (variable REPOS, por defecto la carpeta
 # que contiene a este repo):
@@ -43,6 +43,15 @@ campanas() {
     mcr.microsoft.com/dotnet/sdk:10.0 sh -c "dotnet test RedVital.Campanas.sln -c Release --nologo; r=\$?; $(devolver); exit \$r"
 }
 
+institucional() {
+  # Dominio, casos de uso, arquitectura, adaptadores HTTP y API sobre PostgreSQL
+  # real (Testcontainers) con las migraciones del repo databases.
+  docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
+    -v redvital-nuget:/root/.nuget/packages -v "$SERVICIOS/institutional:/src" -v "$BDS:/bds:ro" \
+    -e REDVITAL_MIGRACIONES_INSTITUCIONAL=/bds/institucional -e TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1 -w /src \
+    mcr.microsoft.com/dotnet/sdk:10.0 sh -c "dotnet test RedVital.Institucional.sln -c Release --nologo; r=\$?; $(devolver); exit \$r"
+}
+
 donacion() {
   # Unitarias, ArchUnit e integración con PostgreSQL y Kafka reales (Testcontainers).
   docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
@@ -52,11 +61,12 @@ donacion() {
 }
 
 notificaciones() {
-  # Unitarias e integración con Kafka real (Testcontainers) y SMTP en memoria (GreenMail).
+  # Unitarias e integración con Kafka y PostgreSQL reales (Testcontainers), las
+  # migraciones del repo databases y SMTP en memoria (GreenMail).
   docker run --rm --network host -v /var/run/docker.sock:/var/run/docker.sock \
-    -v redvital-m2:/root/.m2 -v "$SERVICIOS/notifications:/src" \
+    -v redvital-m2:/root/.m2 -v "$SERVICIOS/notifications:/src" -v "$BDS:/bds:ro" \
     -e TESTCONTAINERS_HOST_OVERRIDE=127.0.0.1 -w /src maven:3.9-eclipse-temurin-25 \
-    sh -c "mvn -B verify; r=\$?; $(devolver); exit \$r"
+    sh -c "mvn -B verify -Dredvital.migraciones.dir=/bds/notifications; r=\$?; $(devolver); exit \$r"
 }
 
 web() {
@@ -72,7 +82,7 @@ contratos() {
   docker run --rm -e HOME=/tmp -v redvital-npm:/tmp/.npm -v "$SERVICIOS:/s:ro" node:24 sh -c '
     npx -y @asyncapi/cli@3 config analytics --disable >/dev/null 2>&1
     r=0
-    for c in donation campaign; do
+    for c in donation campaign institutional identity; do
       echo "-- $c/contratos/asyncapi.yaml"
       npx -y @asyncapi/cli@3 validate /s/$c/contratos/asyncapi.yaml || r=1
     done
@@ -109,7 +119,7 @@ secretos() {
   return "$fallos"
 }
 
-TODOS="bds identidad campanas donacion notificaciones web gateway contratos secretos"
+TODOS="bds identidad campanas institucional donacion notificaciones web gateway contratos secretos"
 PEDIDOS=${*:-$TODOS}
 declare -A RESULTADO DURACION
 

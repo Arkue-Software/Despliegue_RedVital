@@ -44,8 +44,9 @@ for par in "$@"; do
   [ "$rol" != "$par" ] && [ -n "$ip" ] || { echo "Argumento inválido: $par. $USO" >&2; exit 1; }
   carpetas=$(carpetas_de "$rol") || { echo "Rol desconocido: $rol. $USO" >&2; exit 1; }
   for carpeta in $carpetas; do
-    [ -d "$REPOS/$carpeta" ] || { echo "Falta $REPOS/$carpeta" >&2; exit 1; }
+    [ -d "$REPOS/$carpeta" ] || { echo "Falta $REPOS/$carpeta. Ármalo con scripts/clonar-repos.sh" >&2; exit 1; }
   done
+  [ "$rol" = tools ] || "$RAIZ/scripts/verificar-codigo.sh" "$rol"
 done
 
 OPCIONES=(

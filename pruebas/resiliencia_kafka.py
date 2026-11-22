@@ -24,9 +24,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from extremo_a_extremo import Cliente, comprobar, esperar, resultados
+from extremo_a_extremo import PROYECTOS_SERVICIOS, Cliente, comprobar, esperar, leer_clave_qa, resultados
 
-SERVICIOS = ("identity-service", "campaign-service", "donation-service", "notification-worker")
+SERVICIOS = ("identity-service", "institutional-service", "campaign-service", "donation-service", "notification-worker")
 # Un servicio que esperara al broker tardaría al menos max.block.ms (5 s).
 PLAZO_SIN_ESPERA = 3.0
 
@@ -62,13 +62,13 @@ def main():
     p.add_argument("--base", default="https://localhost")
     p.add_argument("--ca", required=True, help="raíz de la CA del borde (Caddy tls internal)")
     p.add_argument("--secretos", required=True)
-    p.add_argument("--ambiente", default="qa")
+    p.add_argument("--ambiente", default="qa", choices=sorted(PROYECTOS_SERVICIOS))
     p.add_argument("--segundos-caido", type=int, default=60, help="cuánto tiempo queda Kafka detenido")
     a = p.parse_args()
 
     contexto = ssl.create_default_context(cafile=a.ca)
-    clave_qa = open(f"{a.secretos}/clave_cuentas_qa").read().strip()
-    proyecto = f"redvital-{a.ambiente}-servicios"
+    clave_qa = leer_clave_qa(a.secretos)
+    proyecto = PROYECTOS_SERVICIOS[a.ambiente]
     kafka = f"{proyecto}-kafka-1"
     contenedores = {s: f"{proyecto}-{s}-1" for s in SERVICIOS}
 
@@ -94,14 +94,21 @@ def main():
         comprobar(f"registro anónimo -> 201 en {duracion:.2f} s", estado == 201 and duracion < PLAZO_SIN_ESPERA,
                   f"{estado} {intencion}")
 
+        # La cuenta en Identidad, la sesión y el perfil en Donación: tres pasos, ninguno espera al broker.
         documento = str(random.randint(10**9, 10**10 - 1))
         correo = f"resiliencia.{uuid.uuid4().hex[:8]}@redvital.test"
-        (estado, _, _), duracion = cronometrado(lambda: anonimo.pedir("POST", "/api/v1/donantes", {
-            "documento": documento, "nombre": "Prueba Resiliencia", "fecha_nacimiento": "1990-05-20",
-            "correo_acceso": correo, "credencial": "Prueba" + uuid.uuid4().hex[:10] + "7", "correo": None,
-            "telefono": "3001234567", "municipio_ruta": "/00/05/05001", "autoriza_tratamiento_datos": True,
-            "autoriza_avisos_campanas": False, "version_aviso": "AV-2026.1"}, idempotente=True))
+        credencial = "Prueba" + uuid.uuid4().hex[:10] + "7"
+        (estado, _, _), duracion = cronometrado(lambda: anonimo.pedir("POST", "/api/v1/cuentas-donante", {
+            "correo": correo, "credencial": credencial, "nombre": "Prueba Resiliencia"}, idempotente=True))
         comprobar(f"crear cuenta de donante -> 201 en {duracion:.2f} s", estado == 201 and duracion < PLAZO_SIN_ESPERA,
+                  str(estado))
+        donante = Cliente(a.base, contexto)
+        donante.entrar(correo, credencial)
+        (estado, _, _), duracion = cronometrado(lambda: donante.pedir("POST", "/api/v1/donantes", {
+            "documento": documento, "nombre": "Prueba Resiliencia", "fecha_nacimiento": "1990-05-20",
+            "correo": None, "telefono": "3001234567", "municipio_ruta": "/00/05/05001", "autoriza_tratamiento_datos": True,
+            "autoriza_avisos_campanas": False, "version_aviso": "AV-2026.1"}, idempotente=True))
+        comprobar(f"crear su perfil de donante -> 201 en {duracion:.2f} s", estado == 201 and duracion < PLAZO_SIN_ESPERA,
                   str(estado))
 
         _, presente, _ = operador.pedir("POST", "/api/v1/donantes/busqueda", {"documento": documento})

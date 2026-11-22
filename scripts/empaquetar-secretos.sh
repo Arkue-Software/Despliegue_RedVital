@@ -26,12 +26,14 @@ case "$VM" in
       postgres_superusuario_identidad identidad_propietario identidad_servicio
       postgres_superusuario_campana campana_propietario campana_servicio
       postgres_superusuario_donacion donacion_propietario donacion_servicio
+      postgres_superusuario_institucional institucional_propietario institucional_servicio
+      postgres_superusuario_notifications notifications_propietario notifications_servicio
       credenciales_servicio.sql semilla_identidad.sql" ;;
   servicios)
-    archivos="postgres_ca identidad_servicio identidad_clave_firma campana_servicio
-      donacion_servicio donacion_secreto_identidad donacion_clave_hmac
-      kafka_inicializacion kafka_donacion kafka_campanias kafka_notificaciones kafka_inspeccion
-      notificaciones_secreto_identidad notificaciones_smtp_clave" ;;
+    archivos="postgres_ca identidad_servicio identidad_clave_firma identidad_llave_publica
+      campana_servicio institucional_servicio notifications_servicio donacion_servicio donacion_clave_hmac
+      kafka_inicializacion kafka_donacion kafka_campanias kafka_notificaciones kafka_identidad
+      kafka_institucional kafka_inspeccion notificaciones_smtp_clave" ;;
   borde)
     archivos="gateway-secreto-cliente" ;;
   tools)

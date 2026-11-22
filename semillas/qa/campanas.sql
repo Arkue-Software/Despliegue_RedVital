@@ -4,7 +4,8 @@
 --   a1000000-…-0001 Banco Aurora (Medellín, 05001)
 --   a1000000-…-0002 Banco Ceiba  (Bello, 05088)
 -- Las fechas son relativas al momento de aplicar la semilla, para que QA
--- siempre tenga jornadas vigentes. Idempotente: puede aplicarse de nuevo.
+-- siempre tenga jornadas vigentes: aplicarla de nuevo las renueva, sin tocar
+-- el estado ni los conteos que hayan cambiado las pruebas. Idempotente.
 --
 -- Cada campaña publicada deja además su EV-03 (campaign.published) en la
 -- bandeja de salida, tal como lo haría el servicio al publicarla: el
@@ -43,9 +44,17 @@ VALUES
    date_trunc('day', now()) - interval '20 days' + interval '13 hours',
    date_trunc('day', now()) - interval '18 days' + interval '22 hours', 100, 'cerrada', now() - interval '25 days',
    'b2000000-0000-4000-8000-000000000002')
-ON CONFLICT (id) DO NOTHING;
+ON CONFLICT (id) DO UPDATE SET
+    inicia_en = EXCLUDED.inicia_en,
+    termina_en = EXCLUDED.termina_en,
+    -- Una campaña que las pruebas publicaron conserva la publicación, con fecha nueva.
+    publicada_en = CASE WHEN campania.publicada_en IS NULL THEN NULL
+                        ELSE COALESCE(EXCLUDED.publicada_en, now()) END,
+    actualizada_en = now();
 
 -- EV-03 de las campañas publicadas o cerradas (una cerrada también se publicó).
+-- La clave lleva la fecha de publicación: cada vez que la semilla renueva las
+-- fechas sale un evento nuevo, y Donación actualiza su copia con él.
 INSERT INTO evento_salida (id, tipo, version_esquema, tema, clave, carga, clave_natural, correlacion_id)
 SELECT gen_random_uuid(), 'campaign.published', 1, 'redvital.campanias.campaign-published.v1', c.id::text,
        jsonb_build_object(
@@ -58,7 +67,7 @@ SELECT gen_random_uuid(), 'campaign.published', 1, 'redvital.campanias.campaign-
          'inicia_en', to_char(c.inicia_en AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
          'termina_en', to_char(c.termina_en AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
          'publicada_en', to_char(c.publicada_en AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')),
-       'campania_publicada:' || c.id, 'semilla-qa'
+       'semilla:' || c.id || ':' || to_char(c.publicada_en AT TIME ZONE 'UTC', 'YYYYMMDDHH24MISS'), 'semilla-qa'
 FROM campania c
 WHERE c.id::text LIKE 'd4000000-%' AND c.estado IN ('publicada', 'cerrada')
 ON CONFLICT (clave_natural) DO NOTHING;

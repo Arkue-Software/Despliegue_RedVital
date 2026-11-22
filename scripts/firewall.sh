@@ -7,7 +7,7 @@
 #
 # Docker publica los puertos con DNAT antes de que el tráfico llegue a INPUT,
 # así que ufw no los ve: las reglas van en DOCKER-USER. Como el paquete ya
-# viene traducido al puerto del contenedor (5432 para las tres bases), se
+# viene traducido al puerto del contenedor (5432 para todas las bases), se
 # filtra por el destino ORIGINAL (--ctorigdst / --ctorigdstport).
 #
 # Cada puerto publicado se abre solo al origen que lo necesita y se descarta
@@ -82,12 +82,12 @@ ipt -A REDVITAL -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
 case "$VM" in
   datos)
     # Bases: solo la VM de servicios. Métricas: solo Tools.
-    for puerto in 5432 5433 5434; do permitir "$DATOS" "$puerto" "$SERVICIOS"; done
+    for puerto in 5432 5433 5434 5435 5436; do permitir "$DATOS" "$puerto" "$SERVICIOS"; done
     for puerto in 9100 9180; do permitir "$DATOS" "$puerto" "$TOOLS"; done
     ;;
   servicios)
     # Upstreams de APISIX: solo la VM de borde.
-    for puerto in 8080 8082 8083; do permitir "$SERVICIOS" "$puerto" "$BORDE"; done
+    for puerto in 8080 8082 8083 8084; do permitir "$SERVICIOS" "$puerto" "$BORDE"; done
     # Kafka EXTERNO (Kafbat), JMX, métricas de Donación y exportadores: solo Tools.
     for puerto in 9094 9404 8183 9100 9180; do permitir "$SERVICIOS" "$puerto" "$TOOLS"; done
     ;;
